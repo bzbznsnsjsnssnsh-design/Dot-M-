@@ -1,0 +1,2253 @@
+================================================================
+توثيق مشروع مترجم الفيديو - الكود الكامل لجميع الملفات
+================================================================
+تاريخ الإنشاء: 2026-05-25
+================================================================
+
+
+================================================================
+artifacts/video-translator/src/main.tsx
+================================================================
+import { createRoot } from "react-dom/client";
+import App from "./App";
+import "./index.css";
+
+createRoot(document.getElementById("root")!).render(<App />);
+
+
+================================================================
+artifacts/video-translator/src/App.tsx
+================================================================
+import { Switch, Route, Router as WouterRouter } from "wouter";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Toaster } from "@/components/ui/toaster";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import Home from "@/pages/Home";
+import NotFound from "@/pages/not-found";
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: 1,
+      refetchOnWindowFocus: false,
+    },
+  },
+});
+
+function Router() {
+  return (
+    <Switch>
+      <Route path="/" component={Home} />
+      <Route component={NotFound} />
+    </Switch>
+  );
+}
+
+function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+          <Router />
+        </WouterRouter>
+        <Toaster />
+      </TooltipProvider>
+    </QueryClientProvider>
+  );
+}
+
+export default App;
+
+
+================================================================
+artifacts/video-translator/vite.config.ts
+================================================================
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
+import path from "path";
+import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
+
+const port = Number(process.env.PORT || "5000");
+const basePath = process.env.BASE_PATH || "/";
+
+export default defineConfig({
+  base: basePath,
+  plugins: [
+    react(),
+    tailwindcss(),
+    runtimeErrorOverlay(),
+    ...(process.env.NODE_ENV !== "production" &&
+    process.env.REPL_ID !== undefined
+      ? [
+          await import("@replit/vite-plugin-cartographer").then((m) =>
+            m.cartographer({
+              root: path.resolve(import.meta.dirname, ".."),
+            }),
+          ),
+          await import("@replit/vite-plugin-dev-banner").then((m) =>
+            m.devBanner(),
+          ),
+        ]
+      : []),
+  ],
+  resolve: {
+    alias: {
+      "@": path.resolve(import.meta.dirname, "src"),
+      "@assets": path.resolve(import.meta.dirname, "..", "..", "attached_assets"),
+    },
+    dedupe: ["react", "react-dom"],
+  },
+  root: path.resolve(import.meta.dirname),
+  build: {
+    outDir: path.resolve(import.meta.dirname, "dist/public"),
+    emptyOutDir: true,
+  },
+  server: {
+    port,
+    strictPort: false,
+    host: "0.0.0.0",
+    allowedHosts: true,
+    fs: {
+      strict: true,
+    },
+  },
+  preview: {
+    port,
+    host: "0.0.0.0",
+    allowedHosts: true,
+  },
+});
+
+
+================================================================
+artifacts/video-translator/src/hooks/use-youtube-url.ts
+================================================================
+import { useState, useMemo } from 'react';
+
+function extractYouTubeId(url: string): string | null {
+  const match = url.match(
+    /(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([^&?\n]+)/
+  );
+  return match ? match[1] : null;
+}
+
+function buildDirectVideoUrl(url: string): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    // pixeldrain: /u/<id> -> /api/file/<id>
+    if (u.hostname === 'pixeldrain.com') {
+      if (u.pathname.startsWith('/u/')) {
+        return `https://pixeldrain.com/api/file/${u.pathname.slice(3)}`;
+      }
+      if (u.pathname.startsWith('/api/file/')) return url;
+    }
+    // Direct media file extensions
+    const ext = u.pathname.split('.').pop()?.toLowerCase() ?? '';
+    if (['mp4', 'webm', 'ogg', 'mov', 'mkv', 'm4v'].includes(ext)) return url;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function useYoutubeUrl() {
+  const [url, setUrl] = useState('');
+
+  const videoId = useMemo(() => extractYouTubeId(url), [url]);
+
+  const directVideoUrl = useMemo(() => {
+    if (videoId) return null; // YouTube takes priority
+    return buildDirectVideoUrl(url);
+  }, [url, videoId]);
+
+  const isValid = !!(videoId || directVideoUrl);
+
+  return { url, setUrl, videoId, directVideoUrl, isValid };
+}
+
+
+================================================================
+artifacts/video-translator/src/components/pipeline-bar.tsx
+================================================================
+import React, { useEffect, useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { AudioLines, Languages, Mic, Download, Sparkles, CheckCircle2 } from 'lucide-react';
+
+interface PipelineBarProps {
+  isVisible: boolean;
+  progressText: string;
+  segmentLabel: string;
+  done: boolean;
+}
+
+function textToPercent(text: string): number {
+  if (!text) return 5;
+  if (text.includes('تنزيل') || text.includes('استخراج') || text.includes('⬇️')) return 20;
+  if (text.includes('Whisper') || text.includes('تحويل') || text.includes('🎙️')) return 55;
+  if (text.includes('ترجمة') || text.includes('🌍')) return 75;
+  if (text.includes('توليد') || text.includes('Edge') || text.includes('🔊')) return 90;
+  if (text.includes('اكتمل') || text.includes('✅')) return 100;
+  return 10;
+}
+
+function getIcon(text: string) {
+  if (text.includes('🎙️') || text.includes('Whisper') || text.includes('نص')) return <Mic className="w-4 h-4" />;
+  if (text.includes('ترجمة') || text.includes('🌍')) return <Languages className="w-4 h-4" />;
+  if (text.includes('توليد') || text.includes('🔊') || text.includes('TTS')) return <Sparkles className="w-4 h-4" />;
+  if (text.includes('تنزيل') || text.includes('⬇️')) return <Download className="w-4 h-4" />;
+  if (text.includes('اكتمل') || text.includes('✅')) return <CheckCircle2 className="w-4 h-4 text-emerald-400" />;
+  return <AudioLines className="w-4 h-4" />;
+}
+
+export function PipelineBar({ isVisible, progressText, segmentLabel, done }: PipelineBarProps) {
+  const [displayPercent, setDisplayPercent] = useState(0);
+  const targetPercent = done ? 100 : textToPercent(progressText);
+
+  useEffect(() => {
+    if (!isVisible) { setDisplayPercent(0); return; }
+    const diff = targetPercent - displayPercent;
+    if (Math.abs(diff) < 1) return;
+    const step = diff > 0 ? Math.max(1, diff * 0.15) : diff;
+    const t = setTimeout(() => setDisplayPercent(p => Math.min(100, Math.max(0, p + step))), 60);
+    return () => clearTimeout(t);
+  }, [targetPercent, displayPercent, isVisible]);
+
+  useEffect(() => {
+    if (isVisible && !done) setDisplayPercent(2);
+  }, [segmentLabel]);
+
+  const steps = [
+    { label: 'تنزيل الصوت', threshold: 20 },
+    { label: 'تحويل لنص', threshold: 55 },
+    { label: 'ترجمة', threshold: 75 },
+    { label: 'توليد صوت', threshold: 90 },
+    { label: 'جاهز!', threshold: 100 },
+  ];
+
+  return (
+    <AnimatePresence>
+      {isVisible && (
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: 10 }}
+          className="w-full rounded-xl bg-slate-800/80 border border-slate-700/50 p-4"
+        >
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2 text-slate-300 text-sm">
+              <motion.div
+                animate={done ? {} : { rotate: 360 }}
+                transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+              >
+                {getIcon(progressText)}
+              </motion.div>
+              <span className="font-medium">معالجة الخلفية</span>
+            </div>
+            {segmentLabel && (
+              <span className="text-xs text-slate-400 bg-slate-700/50 px-2 py-0.5 rounded-full">
+                {segmentLabel}
+              </span>
+            )}
+          </div>
+
+          <div className="relative h-2 bg-slate-700 rounded-full overflow-hidden mb-2">
+            <motion.div
+              className="h-full rounded-full bg-gradient-to-r from-violet-500 to-indigo-400"
+              style={{ width: `${displayPercent}%` }}
+              transition={{ duration: 0.3 }}
+            />
+          </div>
+
+          <div className="flex justify-between mt-1">
+            {steps.map((step) => (
+              <span
+                key={step.label}
+                className={`text-xs transition-colors duration-500 ${
+                  displayPercent >= step.threshold
+                    ? 'text-indigo-300'
+                    : 'text-slate-600'
+                }`}
+              >
+                {step.label}
+              </span>
+            ))}
+          </div>
+
+          <p className="mt-2 text-xs text-slate-400 truncate">{progressText}</p>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
+
+================================================================
+artifacts/video-translator/src/pages/Home.tsx
+================================================================
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import YouTube from 'react-youtube';
+import {
+  Play, Square, Youtube, Volume2, Loader2, CheckCircle2,
+  Cookie, ChevronDown, ChevronUp, Trash2, Globe, BookOpen,
+  SkipBack, SkipForward, Clock, Mic, Maximize2, Video,
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+
+import { useToast } from '@/hooks/use-toast';
+import { useGetTtsModels } from '@workspace/api-client-react';
+import { useYoutubeUrl } from '@/hooks/use-youtube-url';
+import { PipelineBar } from '@/components/pipeline-bar';
+
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
+import { Textarea } from '@/components/ui/textarea';
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select';
+
+// --- Constants ---
+const SEGMENT_STEP  = 59;   // seconds per segment
+const POLL_MS       = 600;
+const MAX_RETRIES   = 2;
+const NAV_GRACE_MS  = 1500;
+
+type TranslationEngine = 'openai' | 'google' | 'pollinations';
+type SentenceStatus    = 'pending' | 'translating' | 'tts' | 'completed' | 'failed';
+
+interface StoredSentence {
+  videoStart:       number;
+  videoEnd:         number;
+  arabicText:       string;
+  audioStart:       number;
+  audioEnd:         number;
+  audioUrl?:        string;
+  audioDuration?:   number;
+  sentenceStatus?:  SentenceStatus;
+  originalDuration?: number;
+  ttsDuration?:     number;
+  speedRatio?:      number;
+}
+
+interface SegJob {
+  jobId:            string;
+  status:           'processing' | 'completed' | 'failed';
+  progress:         string;
+  suggestedRate:    number | null;
+  audioDurationSec: number | null;
+  sentences:        StoredSentence[] | null;
+}
+
+// --- Helpers ---
+function fmt(s: number) {
+  const m = Math.floor(s / 60);
+  return `${m}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+}
+
+function segLabel(start: number) {
+  return `${fmt(start)} - ${fmt(start + SEGMENT_STEP)}`;
+}
+
+function getSegStart(videoTime: number, step: number): number {
+  return Math.floor(videoTime / step) * step;
+}
+
+function statusLabel(st?: SentenceStatus): string {
+  if (st === 'translating') return '🌍';
+  if (st === 'tts')         return '🔊';
+  if (st === 'completed')   return '✅';
+  if (st === 'failed')      return '❌';
+  return '⏳';
+}
+
+// --- API calls ---
+async function postProcess(
+  videoUrl: string, startTime: number, voice: string,
+  translationEngine: TranslationEngine
+): Promise<string> {
+  const r = await fetch('/api/translate/process', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ videoUrl, startTime, voice, translationEngine, forceAudioExtraction: true }),
+  });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || 'فشل الطلب');
+  return d.jobId as string;
+}
+
+async function fetchStatus(jobId: string) {
+  const r = await fetch(`/api/translate/status/${jobId}`);
+  return r.json();
+}
+
+async function fetchCookiesStatus(): Promise<boolean> {
+  try {
+    const r = await fetch('/api/translate/cookies/status');
+    return (await r.json()).hasCookies === true;
+  } catch { return false; }
+}
+
+async function fetchVideoInfo(videoUrl: string): Promise<string | null> {
+  try {
+    const r = await fetch(`/api/translate/info?url=${encodeURIComponent(videoUrl)}`);
+    const d = await r.json();
+    return d.title ?? null;
+  } catch { return null; }
+}
+
+async function postCookies(content: string): Promise<{ success: boolean; message: string }> {
+  const r = await fetch('/api/translate/cookies', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cookies: content }),
+  });
+  const d = await r.json();
+  if (!r.ok) return { success: false, message: d.error || 'فشل الحفظ' };
+  return { success: true, message: d.message };
+}
+
+async function deleteCookiesReq() {
+  await fetch('/api/translate/cookies', { method: 'DELETE' });
+}
+
+// --- Static data ---
+const TRANSLATION_ENGINES: { value: TranslationEngine; label: string; description: string; free: boolean }[] = [
+  { value: 'google',       label: 'Google Translate', description: 'مجاني - سريع',         free: true  },
+  { value: 'pollinations', label: 'Pollinations AI',  description: 'مجاني - ذكاء اصطناعي', free: true  },
+  { value: 'openai',       label: 'OpenAI GPT',       description: 'دقيق - يحتاج مفتاح',    free: false },
+];
+
+// --- Component ---
+export default function Home() {
+  const { toast } = useToast();
+  const { url, setUrl, videoId, directVideoUrl, isValid } = useYoutubeUrl();
+
+  // refs
+  const ytRef               = useRef<any>(null);
+  const videoRef            = useRef<HTMLVideoElement>(null);
+  const audioRef            = useRef<HTMLAudioElement>(null);
+  const preloadRef          = useRef<HTMLAudioElement>(null);
+  const jobsRef             = useRef<Map<number, SegJob>>(new Map());
+  const activeSegRef        = useRef<number>(-1);
+  const stopRequestedRef    = useRef(false);
+  const waitingRef          = useRef(false);
+  const kickCountRef        = useRef<Map<number, number>>(new Map());
+  const lastRetryRef        = useRef<Map<number, number>>(new Map());
+  const stepRef             = useRef<number>(SEGMENT_STEP);
+  const lastVideoTimeRef    = useRef<number>(-1);
+  const lastSeekCheckRef    = useRef<number>(-1);
+  const playingSegRef       = useRef<number>(-1);
+  const currentSentIdxRef    = useRef<number>(-1);
+  const audioLoadedForSent   = useRef<number>(-1);
+  const videoSentIdxRef      = useRef<number>(-1);
+  const pendingNextSentRef   = useRef<number>(-1);
+  const currentSentTextRef   = useRef<string | null>(null);
+  const navGraceRef          = useRef<number>(0);
+  const pendingCanplayRef   = useRef<(() => void) | null>(null);
+  const preloadTriggeredRef = useRef<string>('');
+  const syncLoopRef         = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // state
+  const [jobs,                setJobs]               = useState<Map<number, SegJob>>(new Map());
+  const [activeSeg,           setActiveSeg]          = useState<number>(-1);
+  const [processingProgress,  setProcessingProgress] = useState('');
+  const [isRunning,           setIsRunning]          = useState(false);
+  const [ytReady,             setYtReady]            = useState(false);
+  const [duration,            setDuration]           = useState(0);
+  const [selectedVoice,       setSelectedVoice]      = useState('');
+  const [selectedEngine,      setSelectedEngine]     = useState<TranslationEngine>('google');
+  const [hasStarted,          setHasStarted]         = useState(false);
+  const [isWaitingForProcess, setIsWaitingForProcess]= useState(false);
+  const [currentSentence,     setCurrentSentence]    = useState<string | null>(null);
+  const [currentSentenceIdx,  setCurrentSentenceIdx] = useState<number>(-1);
+  const [currentSpeedInfo,    setCurrentSpeedInfo]   = useState<{ orig: number; tts: number; ratio: number } | null>(null);
+  const [videoTitle,          setVideoTitle]         = useState<string | null>(null);
+  const [showCookies,         setShowCookies]        = useState(false);
+  const [cookieText,          setCookieText]         = useState('');
+  const [hasCookies,          setHasCookies]         = useState(false);
+  const [cookiesSaving,       setCookiesSaving]      = useState(false);
+
+  const { data: modelsData } = useGetTtsModels();
+
+  useEffect(() => { fetchCookiesStatus().then(setHasCookies); }, []);
+
+  useEffect(() => {
+    if (modelsData?.voices?.length && !selectedVoice)
+      setSelectedVoice(modelsData.voices[0].id);
+  }, [modelsData, selectedVoice]);
+
+  useEffect(() => {
+    if (!isValid || !videoId) { setVideoTitle(null); return; }
+    let cancelled = false;
+    fetchVideoInfo(url).then(title => {
+      if (!cancelled) setVideoTitle(title);
+    });
+    return () => { cancelled = true; };
+  }, [url, isValid, videoId]);
+
+  const activeJob = activeSeg >= 0 ? jobs.get(activeSeg) : undefined;
+  const syncJobs = useCallback(() => setJobs(new Map(jobsRef.current)), []);
+
+  const cancelPendingLoad = useCallback(() => {
+    const audio = audioRef.current;
+    if (audio && pendingCanplayRef.current) {
+      audio.removeEventListener('canplay', pendingCanplayRef.current);
+      pendingCanplayRef.current = null;
+    }
+  }, []);
+
+  const preloadSentenceAudio = useCallback((seg: number, sentIdx: number) => {
+    const job  = jobsRef.current.get(seg);
+    const sent = job?.sentences?.[sentIdx];
+    if (!sent?.audioUrl || sent.sentenceStatus !== 'completed') return;
+    const el = preloadRef.current;
+    if (!el) return;
+    const target = new URL(sent.audioUrl, window.location.href).href;
+    if (preloadTriggeredRef.current === target) return;
+    preloadTriggeredRef.current = target;
+    el.src = sent.audioUrl;
+    el.preload = 'auto';
+    el.load();
+  }, []);
+
+  const loadSentenceAudio = useCallback((
+    seg: number,
+    sentIdx: number,
+    audioUrl: string,
+    startTime = 0,
+  ) => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    cancelPendingLoad();
+    playingSegRef.current      = seg;
+    currentSentIdxRef.current  = sentIdx;
+    audioLoadedForSent.current = sentIdx;
+    setCurrentSentenceIdx(sentIdx);
+
+    const job  = jobsRef.current.get(seg);
+    const sent = job?.sentences?.[sentIdx];
+    const txt  = sent?.arabicText ?? null;
+    currentSentTextRef.current = txt;
+    setCurrentSentence(txt);
+    if (sent?.originalDuration && sent?.ttsDuration && sent?.speedRatio) {
+      setCurrentSpeedInfo({ orig: sent.originalDuration, tts: sent.ttsDuration, ratio: sent.speedRatio });
+    } else {
+      setCurrentSpeedInfo(null);
+    }
+
+    const targetHref = new URL(audioUrl, window.location.href).href;
+
+    if (audio.src === targetHref && !audio.ended) {
+      audio.currentTime = startTime;
+      if (audio.paused) audio.play().catch(() => {});
+      preloadSentenceAudio(seg, sentIdx + 1);
+      return;
+    }
+
+    const preloadEl = preloadRef.current;
+    const preloadHref = preloadEl?.src ? new URL(preloadEl.src, window.location.href).href : '';
+    const isPreloaded = preloadHref === targetHref && !!preloadEl &&
+                        preloadEl.readyState >= 2;
+
+    if (isPreloaded) {
+      audio.src = audioUrl;
+      audio.currentTime = startTime;
+      audio.play().catch(() => {});
+      preloadTriggeredRef.current = '';
+      preloadSentenceAudio(seg, sentIdx + 1);
+      return;
+    }
+
+    const onReady = () => {
+      pendingCanplayRef.current = null;
+      audio.currentTime = startTime;
+      audio.play().catch(() => {});
+    };
+    pendingCanplayRef.current = onReady;
+    audio.addEventListener('canplay', onReady, { once: true });
+    audio.src = audioUrl;
+    audio.load();
+    preloadSentenceAudio(seg, sentIdx + 1);
+  }, [cancelPendingLoad, preloadSentenceAudio]);
+
+  const jumpToSentence = useCallback((delta: 1 | -1) => {
+    const seg = playingSegRef.current;
+    if (seg < 0) return;
+    if (!ytRef.current && !videoRef.current) return;
+
+    const job = jobsRef.current.get(seg);
+    if (!job?.sentences || job.sentences.length === 0) return;
+
+    const curIdx    = currentSentIdxRef.current;
+    const targetIdx = curIdx + delta;
+    if (targetIdx < 0 || targetIdx >= job.sentences.length) return;
+
+    const target = job.sentences[targetIdx];
+    if (!target?.audioUrl || target.sentenceStatus !== 'completed') return;
+
+    loadSentenceAudio(seg, targetIdx, target.audioUrl, 0);
+    navGraceRef.current = Date.now() + NAV_GRACE_MS;
+
+    const seekTime = seg + target.videoStart;
+    if (videoRef.current) videoRef.current.currentTime = seekTime;
+    else ytRef.current?.seekTo(seekTime, true);
+
+    lastSeekCheckRef.current = seekTime;
+  }, [loadSentenceAudio]);
+
+  const handleYtReady = (e: any) => {
+    ytRef.current = e.target;
+    setYtReady(true);
+    const dur = e.target.getDuration();
+    if (dur > 0) setDuration(dur);
+  };
+
+  const handleYtStateChange = useCallback((e: any) => {
+    const YT = (window as any).YT;
+    if (!YT) return;
+    if (e.data === YT.PlayerState.ENDED) {
+      if (audioRef.current) audioRef.current.pause();
+    } else if (e.data === YT.PlayerState.PAUSED) {
+      if (audioRef.current && !audioRef.current.paused) audioRef.current.pause();
+    } else if (e.data === YT.PlayerState.PLAYING) {
+      const a = audioRef.current;
+      if (a?.src && a.paused && !a.ended) a.play().catch(() => {});
+    }
+  }, []);
+
+  const startSyncLoop = useCallback(() => {
+    if (syncLoopRef.current) clearInterval(syncLoopRef.current);
+    syncLoopRef.current = setInterval(() => {
+      const videoTime = videoRef.current
+        ? videoRef.current.currentTime
+        : (ytRef.current?.getCurrentTime?.() ?? 0);
+
+      if (!ytRef.current && !videoRef.current) return;
+
+      const lastSC = lastSeekCheckRef.current;
+      if (lastSC >= 0 && Math.abs(videoTime - lastSC) > 3.0) {
+        const aud = audioRef.current;
+        if (aud) { aud.pause(); aud.playbackRate = 1.0; }
+        audioLoadedForSent.current  = -1;
+        pendingNextSentRef.current  = -1;
+        currentSentIdxRef.current   = -1;
+        currentSentTextRef.current  = null;
+        setCurrentSentenceIdx(-1);
+        setCurrentSentence(null);
+        setCurrentSpeedInfo(null);
+        lastSeekCheckRef.current    = videoTime;
+        lastVideoTimeRef.current    = videoTime;
+        return;
+      }
+      lastSeekCheckRef.current = videoTime;
+
+      const step      = stepRef.current;
+      const seg       = getSegStart(videoTime, step);
+
+      activeSegRef.current = seg;
+      setActiveSeg(seg);
+
+      const job = jobsRef.current.get(seg);
+      if (!job?.sentences) { lastVideoTimeRef.current = videoTime; return; }
+
+      const relTime     = Math.max(0, videoTime - seg);
+      const sentenceIdx = job.sentences.findIndex(
+        s => relTime >= s.videoStart && relTime < s.videoEnd
+      );
+
+      videoSentIdxRef.current = sentenceIdx;
+
+      if (Date.now() < navGraceRef.current) {
+        lastVideoTimeRef.current = videoTime;
+        return;
+      }
+
+      const audio       = audioRef.current;
+      const audioActive = !!(audio && !audio.paused && !audio.ended && audio.src);
+
+      if (sentenceIdx >= 0) {
+        const s       = job.sentences[sentenceIdx];
+        const newText = s.arabicText || null;
+
+        const displayIdx = Math.max(sentenceIdx, audioLoadedForSent.current);
+        if (displayIdx !== currentSentIdxRef.current) {
+          currentSentIdxRef.current = displayIdx;
+          setCurrentSentenceIdx(displayIdx);
+        }
+        if (newText && newText !== currentSentTextRef.current) {
+          currentSentTextRef.current = newText;
+          setCurrentSentence(newText);
+        }
+
+        const audioCursor = audioLoadedForSent.current;
+
+        const pending = pendingNextSentRef.current;
+        if (pending >= 0 && !audioActive) {
+          const pendingS = job.sentences[pending];
+          if (pendingS?.audioUrl && pendingS.sentenceStatus === 'completed') {
+            pendingNextSentRef.current = -1;
+            loadSentenceAudio(seg, pending, pendingS.audioUrl, 0);
+            lastVideoTimeRef.current = videoTime;
+            return;
+          }
+          if (sentenceIdx > pending + 1) {
+            pendingNextSentRef.current = -1;
+          } else {
+            lastVideoTimeRef.current = videoTime;
+            return;
+          }
+        }
+
+        if (sentenceIdx > audioCursor + 1 && !audioActive) {
+          if (s.audioUrl && s.sentenceStatus === 'completed') {
+            loadSentenceAudio(seg, sentenceIdx, s.audioUrl, 0);
+          }
+          lastVideoTimeRef.current = videoTime;
+          return;
+        }
+
+        if (!audioActive && audioCursor < 0 && pending < 0) {
+          if (s.audioUrl && s.sentenceStatus === 'completed') {
+            loadSentenceAudio(seg, sentenceIdx, s.audioUrl, 0);
+          }
+        }
+
+        if (!audioActive && audioCursor === sentenceIdx) {
+          const a = audioRef.current;
+          if (a && a.src && !a.ended && a.paused) a.play().catch(() => {});
+        }
+
+        if (audioActive && audio) {
+          const sentInfo = job.sentences[audioLoadedForSent.current];
+          if (sentInfo) {
+            const videoProgress = Math.max(0, (videoTime - seg) - sentInfo.videoStart);
+            const audioProgress = audio.currentTime;
+            const error = videoProgress - audioProgress;
+            if (Math.abs(error) > 0.08) {
+              const newRate = Math.max(0.65, Math.min(2.1, 1.0 + 0.5 * error));
+              if (Math.abs((audio.playbackRate || 1.0) - newRate) > 0.04) {
+                audio.playbackRate = newRate;
+              }
+            } else if (Math.abs((audio.playbackRate || 1.0) - 1.0) > 0.04) {
+              audio.playbackRate = 1.0;
+            }
+
+            const timeLeft = (audio.duration || 0) - audio.currentTime;
+            if (timeLeft > 0 && timeLeft < 0.8) {
+              const nextIdx = audioLoadedForSent.current + 1;
+              if (nextIdx < job.sentences.length) {
+                preloadSentenceAudio(seg, nextIdx);
+              } else {
+                const nextSeg = seg + stepRef.current;
+                const nextJob = jobsRef.current.get(nextSeg);
+                if (nextJob?.sentences?.[0]?.sentenceStatus === 'completed') {
+                  preloadSentenceAudio(nextSeg, 0);
+                }
+              }
+            }
+          }
+        }
+
+      } else {
+        if (currentSentIdxRef.current >= 0) {
+          if (audio && !audio.paused) audio.pause();
+          currentSentIdxRef.current  = -1;
+          audioLoadedForSent.current = -1;
+          pendingNextSentRef.current = -1;
+          currentSentTextRef.current = null;
+          setCurrentSentenceIdx(-1);
+          setCurrentSentence(null);
+          setCurrentSpeedInfo(null);
+        }
+      }
+
+      lastVideoTimeRef.current = videoTime;
+    }, 100);
+  }, [loadSentenceAudio, preloadSentenceAudio]);
+
+  const stopSyncLoop = useCallback(() => {
+    if (syncLoopRef.current) { clearInterval(syncLoopRef.current); syncLoopRef.current = null; }
+  }, []);
+
+  // [... باقي الكود الخاص بـ startTranslation, stopTranslation, JSX ...]
+  // (الكود كامل في الملف الأصلي - 1271 سطر)
+
+
+================================================================
+artifacts/api-server/src/index.ts
+================================================================
+import app from "./app";
+import { logger } from "./lib/logger";
+
+const rawPort = process.env["PORT"];
+
+if (!rawPort) {
+  throw new Error(
+    "PORT environment variable is required but was not provided.",
+  );
+}
+
+const port = Number(rawPort);
+
+if (Number.isNaN(port) || port <= 0) {
+  throw new Error(`Invalid PORT value: "${rawPort}"`);
+}
+
+app.listen(port, (err) => {
+  if (err) {
+    logger.error({ err }, "Error listening on port");
+    process.exit(1);
+  }
+
+  logger.info({ port }, "Server listening");
+});
+
+
+================================================================
+artifacts/api-server/src/app.ts
+================================================================
+import express, { type Express } from "express";
+import cors from "cors";
+import pinoHttp from "pino-http";
+import router from "./routes";
+import { logger } from "./lib/logger";
+
+const app: Express = express();
+
+app.use(
+  pinoHttp({
+    logger,
+    serializers: {
+      req(req) {
+        return {
+          id: req.id,
+          method: req.method,
+          url: req.url?.split("?")[0],
+        };
+      },
+      res(res) {
+        return {
+          statusCode: res.statusCode,
+        };
+      },
+    },
+  }),
+);
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+app.use("/api", router);
+
+export default app;
+
+
+================================================================
+artifacts/api-server/src/routes/translate/index.ts
+================================================================
+import { Router, type IRouter } from "express";
+import { createReadStream, existsSync } from "fs";
+import { ProcessVideoBody, GetJobStatusParams } from "@workspace/api-zod";
+import { createJob, getJob } from "./jobs.js";
+import { processVideoSegment, getSentenceAudioPath, TTS_VOICES, getVideoInfo } from "./processor.js";
+import { saveCookies, deleteCookies, hasCookies } from "./cookies.js";
+
+const router: IRouter = Router();
+
+router.get("/translate/models", (_req, res) => {
+  res.json({ voices: TTS_VOICES });
+});
+
+router.get("/translate/info", async (req, res) => {
+  const { url } = req.query;
+  if (!url || typeof url !== "string") {
+    res.status(400).json({ error: "url required" });
+    return;
+  }
+  const info = await getVideoInfo(url);
+  res.json(info);
+});
+
+router.get("/translate/cookies/status", async (_req, res) => {
+  const has = await hasCookies();
+  res.json({ hasCookies: has });
+});
+
+router.post("/translate/cookies", async (req, res) => {
+  const { cookies } = req.body as { cookies?: string };
+  if (!cookies || typeof cookies !== "string" || cookies.trim().length < 10) {
+    res.status(400).json({ error: "يرجى تقديم محتوى الكوكيز" });
+    return;
+  }
+  try {
+    await saveCookies(cookies.trim());
+    res.json({ success: true, message: "تم حفظ الكوكيز بنجاح ✅" });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || "فشل حفظ الكوكيز" });
+  }
+});
+
+router.delete("/translate/cookies", async (_req, res) => {
+  await deleteCookies();
+  res.json({ success: true, message: "تم حذف الكوكيز" });
+});
+
+router.post("/translate/process", async (req, res) => {
+  const parsed = ProcessVideoBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "validation_error", message: parsed.error.message });
+    return;
+  }
+
+  const { videoUrl, startTime, voice, translationEngine } = parsed.data;
+  const job = createJob(startTime);
+
+  processVideoSegment({
+    jobId: job.jobId,
+    videoUrl,
+    startTime,
+    voice,
+    translationEngine: translationEngine as any,
+    forceAudioExtraction: true,
+  }).catch(() => {});
+
+  res.json({ jobId: job.jobId, status: job.status, message: "بدأت المعالجة" });
+});
+
+router.get("/translate/status/:jobId", (req, res) => {
+  const parsed = GetJobStatusParams.safeParse(req.params);
+  if (!parsed.success) {
+    res.status(400).json({ error: "validation_error", message: parsed.error.message });
+    return;
+  }
+
+  const job = getJob(parsed.data.jobId);
+  if (!job) {
+    res.status(404).json({ error: "not_found", message: "المهمة غير موجودة" });
+    return;
+  }
+
+  res.json({
+    jobId:            job.jobId,
+    status:           job.status,
+    progress:         job.progress,
+    audioUrl:         null,
+    transcript:       job.transcript,
+    translation:      job.translation,
+    error:            job.error,
+    startTime:        job.startTime,
+    suggestedRate:    job.suggestedRate ?? null,
+    audioDurationSec: job.audioDurationSec ?? null,
+    sentences:        job.sentences ?? null,
+  });
+});
+
+router.get("/translate/sentence-audio/:jobId/:idx", (req, res) => {
+  const { jobId, idx } = req.params;
+  const sentenceIdx = parseInt(idx, 10);
+  if (!jobId || isNaN(sentenceIdx) || sentenceIdx < 0) {
+    res.status(400).json({ error: "invalid_params" });
+    return;
+  }
+
+  const audioPath = getSentenceAudioPath(jobId, sentenceIdx);
+  if (!audioPath || !existsSync(audioPath)) {
+    res.status(404).json({ error: "not_found", message: "الصوت غير متوفر بعد" });
+    return;
+  }
+
+  res.setHeader("Content-Type", "audio/mpeg");
+  res.setHeader("Cache-Control", "public, max-age=3600");
+  createReadStream(audioPath).pipe(res);
+});
+
+export default router;
+
+
+================================================================
+artifacts/api-server/src/routes/translate/jobs.ts
+================================================================
+import { randomUUID } from "crypto";
+
+export type JobStatus = "pending" | "processing" | "completed" | "failed";
+export type SentenceStatus = "pending" | "translating" | "tts" | "completed" | "failed";
+
+export interface StoredSentence {
+  videoStart: number;
+  videoEnd: number;
+  arabicText: string;
+  audioStart: number;
+  audioEnd: number;
+  audioUrl?: string;
+  audioDuration?: number;
+  sentenceStatus?: SentenceStatus;
+  originalDuration?: number;
+  ttsDuration?: number;
+  speedRatio?: number;
+}
+
+export interface Job {
+  jobId: string;
+  status: JobStatus;
+  progress: string;
+  audioPath: string | null;
+  transcript: string | null;
+  translation: string | null;
+  error: string | null;
+  startTime: number | null;
+  createdAt: number;
+  suggestedRate: number | null;
+  audioDurationSec: number | null;
+  sentences: StoredSentence[] | null;
+}
+
+const jobs = new Map<string, Job>();
+
+const MAX_JOBS = 100;
+const JOB_TTL_MS = 60 * 60 * 1000;
+
+function cleanOldJobs() {
+  const now = Date.now();
+  if (jobs.size > MAX_JOBS) {
+    const sorted = [...jobs.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt);
+    for (const [id] of sorted.slice(0, jobs.size - MAX_JOBS)) {
+      jobs.delete(id);
+    }
+  }
+  for (const [id, job] of jobs.entries()) {
+    if (now - job.createdAt > JOB_TTL_MS) {
+      jobs.delete(id);
+    }
+  }
+}
+
+export function createJob(startTime: number): Job {
+  cleanOldJobs();
+  const jobId = randomUUID();
+  const job: Job = {
+    jobId,
+    status: "pending",
+    progress: "في الانتظار...",
+    audioPath: null,
+    transcript: null,
+    translation: null,
+    error: null,
+    startTime,
+    createdAt: Date.now(),
+    suggestedRate: null,
+    audioDurationSec: null,
+    sentences: null,
+  };
+  jobs.set(jobId, job);
+  return job;
+}
+
+export function getJob(jobId: string): Job | undefined {
+  return jobs.get(jobId);
+}
+
+export function updateJob(jobId: string, updates: Partial<Job>) {
+  const job = jobs.get(jobId);
+  if (job) {
+    Object.assign(job, updates);
+    jobs.set(jobId, job);
+  }
+}
+
+
+================================================================
+artifacts/api-server/src/routes/translate/cookies.ts
+================================================================
+import { writeFile, unlink, access } from "fs/promises";
+import { join } from "path";
+import { tmpdir } from "os";
+import { constants } from "fs";
+
+const COOKIES_FILE = join(tmpdir(), "yt-cookies.txt");
+
+export function getCookiesPath(): string {
+  return COOKIES_FILE;
+}
+
+export async function hasCookies(): Promise<boolean> {
+  try {
+    await access(COOKIES_FILE, constants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function saveCookies(content: string): Promise<void> {
+  const lines = content.split("\n").map(l => l.trim()).filter(Boolean);
+  const hasCookieLines = lines.some(l => l.includes(".youtube.com") || l.includes("google.com"));
+
+  if (!hasCookieLines) {
+    throw new Error("ملف الكوكيز لا يحتوي على كوكيز يوتيوب أو جوجل صحيحة");
+  }
+
+  await writeFile(COOKIES_FILE, content, "utf-8");
+}
+
+export async function deleteCookies(): Promise<void> {
+  try {
+    await unlink(COOKIES_FILE);
+  } catch { /* ignore */ }
+}
+
+
+================================================================
+artifacts/api-server/src/routes/translate/edge-tts.ts
+================================================================
+import { execFile } from "child_process";
+import { promisify } from "util";
+import { join } from "path";
+import { homedir } from "os";
+import { existsSync } from "fs";
+
+const execFileAsync = promisify(execFile);
+
+const workspaceRoot = join(homedir(), "workspace");
+const pythonLibsBin = join(workspaceRoot, ".pythonlibs", "bin");
+const python3Bin = join(pythonLibsBin, "python3");
+
+function getPythonBin(): string {
+  if (existsSync(python3Bin)) return python3Bin;
+  return "python3";
+}
+
+export async function synthesizeEdgeTTS(
+  text: string,
+  voice: string,
+  speed: number,
+  outputPath: string
+): Promise<void> {
+  const ratePercent = Math.round((speed - 1.0) * 100);
+  const rateStr = ratePercent >= 0 ? `+${ratePercent}%` : `${ratePercent}%`;
+
+  const pyBin = getPythonBin();
+  await execFileAsync(pyBin, [
+    "-m", "edge_tts",
+    "--voice", voice,
+    "--rate", rateStr,
+    "--text", text,
+    "--write-media", outputPath,
+  ], {
+    timeout: 90_000,
+    maxBuffer: 50 * 1024 * 1024,
+  });
+}
+
+export const EDGE_TTS_VOICES = [
+  { id: "ar-SA-HamedNeural",           name: "السعودية - حامد",          lang: "ar-SA" },
+  { id: "ar-SA-ZariyahNeural",         name: "السعودية - ذرية",          lang: "ar-SA" },
+  { id: "ar-EG-ShakirNeural",          name: "مصر - شاكر",              lang: "ar-EG" },
+  { id: "ar-EG-SalmaNeural",           name: "مصر - سلمى",              lang: "ar-EG" },
+  { id: "ar-IQ-BasselNeural",          name: "العراق - باسل",            lang: "ar-IQ" },
+  { id: "ar-IQ-RanaNeural",            name: "العراق - رنا",             lang: "ar-IQ" },
+  { id: "ar-KW-FahedNeural",           name: "الكويت - فهد",             lang: "ar-KW" },
+  { id: "ar-KW-NouraNeural",           name: "الكويت - نورا",            lang: "ar-KW" },
+  { id: "ar-MA-JamalNeural",           name: "المغرب - جمال",            lang: "ar-MA" },
+  { id: "ar-MA-MounaNeural",           name: "المغرب - منى",             lang: "ar-MA" },
+  { id: "en-US-JennyMultilingualNeural", name: "Jenny - متعدد اللغات",   lang: "en-US" },
+  { id: "en-US-RyanMultilingualNeural",  name: "Ryan - متعدد اللغات",    lang: "en-US" },
+  { id: "fr-FR-RemyMultilingualNeural",  name: "Remy - متعدد اللغات",    lang: "fr-FR" },
+  { id: "fr-FR-VivienneMultilingualNeural", name: "Vivienne - متعدد اللغات", lang: "fr-FR" },
+];
+
+
+================================================================
+artifacts/api-server/src/routes/translate/processor.ts
+================================================================
+import { execFile } from "child_process";
+import { promisify } from "util";
+import { mkdtemp, unlink } from "fs/promises";
+import { tmpdir, homedir } from "os";
+import { join } from "path";
+import { existsSync } from "fs";
+import { readdirSync } from "fs";
+import { createReadStream } from "fs";
+import { logger } from "../../lib/logger.js";
+import { updateJob, getJob, type StoredSentence } from "./jobs.js";
+import { synthesizeEdgeTTS, EDGE_TTS_VOICES } from "./edge-tts.js";
+import { hasCookies, getCookiesPath } from "./cookies.js";
+import OpenAI from "openai";
+
+const execFileAsync = promisify(execFile);
+
+const workspaceRoot = join(homedir(), "workspace");
+const pythonLibsPath = join(workspaceRoot, ".pythonlibs", "bin");
+if (!process.env.PATH?.includes(pythonLibsPath)) {
+  process.env.PATH = `${pythonLibsPath}:${process.env.PATH || ""}`;
+}
+
+function discoverNixBin(pkgPattern: string): string | null {
+  try {
+    const nixStore = "/nix/store";
+    const entries = readdirSync(nixStore);
+    const matches = entries
+      .filter((e) => e.includes(pkgPattern) && !e.includes("python") && !e.includes("-dist"))
+      .sort()
+      .reverse();
+    for (const match of matches) {
+      const binDir = `${nixStore}/${match}/bin`;
+      if (existsSync(binDir)) return binDir;
+    }
+  } catch {}
+  return null;
+}
+
+const ytDlpBinDir = discoverNixBin("yt-dlp");
+if (ytDlpBinDir && !process.env.PATH?.includes(ytDlpBinDir)) {
+  process.env.PATH = `${ytDlpBinDir}:${process.env.PATH || ""}`;
+  logger.info({ ytDlpBinDir }, "Added yt-dlp to PATH");
+}
+
+const SEGMENT_DURATION = 60;
+const MIN_ATEMPO = 1.0;
+const MAX_ATEMPO = 2.1;
+
+function numberToArabicWords(n: number): string {
+  if (!Number.isFinite(n) || n < 0 || n > 999_999) return String(Math.round(n));
+  const whole = Math.floor(n);
+  const ones  = ['صفر','واحد','اثنان','ثلاثة','أربعة','خمسة','ستة','سبعة','ثمانية','تسعة',
+                  'عشرة','أحد عشر','اثنا عشر','ثلاثة عشر','أربعة عشر','خمسة عشر',
+                  'ستة عشر','سبعة عشر','ثمانية عشر','تسعة عشر'];
+  const tens  = ['','','عشرون','ثلاثون','أربعون','خمسون','ستون','سبعون','ثمانون','تسعون'];
+  const huns  = ['','مائة','مئتان','ثلاثمائة','أربعمائة','خمسمائة','ستمائة','سبعمائة','ثمانمائة','تسعمائة'];
+
+  function toWords(x: number): string {
+    if (x === 0) return '';
+    if (x < 20)  return ones[x];
+    if (x < 100) { const t = Math.floor(x/10), o = x%10; return o > 0 ? `${ones[o]} و${tens[t]}` : tens[t]; }
+    if (x < 1000) { const h = Math.floor(x/100), r = x%100; return r > 0 ? `${huns[h]} و${toWords(r)}` : huns[h]; }
+    const th = Math.floor(x/1000), r = x%1000;
+    const thWord = th===1 ? 'ألف' : th===2 ? 'ألفان' : th<=10 ? `${ones[th]} آلاف` : `${toWords(th)} ألف`;
+    return r > 0 ? `${thWord} و${toWords(r)}` : thWord;
+  }
+  return whole === 0 ? 'صفر' : toWords(whole);
+}
+
+function prepareTextForTTS(text: string): string {
+  return text
+    .replace(/\b(\d+(?:\.\d+)?)\b/g, (match) => {
+      const num = parseFloat(match);
+      if (Number.isInteger(num) && num >= 0 && num < 1_000_000) {
+        return numberToArabicWords(num);
+      }
+      return match;
+    })
+    .replace(/[()[\]{}]/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+function isOpenAIConfigured(): boolean {
+  const key = process.env.AI_INTEGRATIONS_OPENAI_API_KEY || "";
+  return key.length > 10 && key !== "dummy";
+}
+
+const openai = new OpenAI({
+  baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL || "https://api.openai.com/v1",
+  apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY || "dummy",
+});
+
+const sentenceAudioMap = new Map<string, Map<number, string>>();
+
+export function getSentenceAudioPath(jobId: string, idx: number): string | undefined {
+  return sentenceAudioMap.get(jobId)?.get(idx);
+}
+
+export { EDGE_TTS_VOICES as TTS_VOICES };
+
+export type TranslationEngine = "openai" | "google" | "pollinations";
+
+interface ProcessOptions {
+  jobId: string;
+  videoUrl: string;
+  startTime: number;
+  voice: string;
+  translationEngine?: TranslationEngine;
+  forceAudioExtraction?: boolean;
+}
+
+interface WhisperWord {
+  word: string;
+  start: number;
+  end: number;
+}
+
+interface WhisperSentence {
+  start: number;
+  end: number;
+  text: string;
+  words?: WhisperWord[];
+}
+
+function cleanYouTubeUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    if (u.hostname === "youtu.be") {
+      return `https://youtu.be${u.pathname}`;
+    }
+    const newParams = new URLSearchParams();
+    if (u.searchParams.has("v")) newParams.set("v", u.searchParams.get("v")!);
+    u.search = newParams.toString();
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
+function toHHMMSS(sec: number): string {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+}
+
+async function downloadAudioSegment(
+  videoUrl: string,
+  startTime: number,
+  outputPath: string,
+  cookiesArgs: string[]
+): Promise<void> {
+  const endTime = startTime + SEGMENT_DURATION + 2;
+  const sectionArg = `*${toHHMMSS(startTime)}-${toHHMMSS(endTime)}`;
+  const tmpOut = outputPath.replace(/\.mp3$/, "_seg.%(ext)s");
+  const tmpMp3 = outputPath.replace(/\.mp3$/, "_seg.mp3");
+
+  let lastErr: Error | null = null;
+  let downloaded = false;
+
+  for (const clientArgs of [
+    ["--extractor-args", "youtube:player_client=mweb,android"],
+    ["--extractor-args", "youtube:player_client=tv,ios"],
+    [],
+  ]) {
+    try {
+      await execFileAsync("yt-dlp", [
+        "-f", "bestaudio[ext=m4a]/bestaudio/best",
+        "-x", "--audio-format", "mp3", "--audio-quality", "0",
+        "--download-sections", sectionArg,
+        "--force-keyframes-at-cuts",
+        "-o", tmpOut,
+        "--no-playlist",
+        "--no-check-certificates",
+        "--no-part",
+        ...clientArgs,
+        ...cookiesArgs,
+        videoUrl,
+      ], { timeout: 120_000 });
+      downloaded = true;
+      break;
+    } catch (e: any) {
+      lastErr = e;
+      logger.warn({ err: e?.message?.slice(0,200) }, "yt-dlp section download attempt failed");
+    }
+  }
+
+  if (!downloaded) {
+    logger.info("Falling back to full download + ffmpeg trim");
+    const tmpFull = outputPath.replace(/\.mp3$/, "_full.%(ext)s");
+    const tmpFullMp3 = outputPath.replace(/\.mp3$/, "_full.mp3");
+    let fallbackErr: Error | null = null;
+
+    for (const clientArgs of [
+      ["--extractor-args", "youtube:player_client=mweb,android"],
+      ["--extractor-args", "youtube:player_client=tv,ios"],
+      [],
+    ]) {
+      try {
+        await execFileAsync("yt-dlp", [
+          "-f", "bestaudio[ext=m4a]/bestaudio/best",
+          "-x", "--audio-format", "mp3", "--audio-quality", "0",
+          "-o", tmpFull,
+          "--no-playlist",
+          "--no-check-certificates",
+          "--no-part",
+          ...clientArgs,
+          ...cookiesArgs,
+          videoUrl,
+        ], { timeout: 300_000 });
+        downloaded = true;
+        break;
+      } catch (e: any) {
+        fallbackErr = e;
+      }
+    }
+
+    if (!downloaded) {
+      const msg = (fallbackErr?.message ?? "") + (((fallbackErr as any)?.stderr) ?? "") +
+                  (lastErr?.message ?? "");
+      if (msg.includes("Sign in") || msg.includes("bot") || msg.includes("403")) {
+        throw new Error("يوتيوب يطلب تسجيل الدخول. يرجى إضافة الكوكيز من قسم 'كوكيز يوتيوب'.");
+      }
+      throw new Error(`فشل تنزيل الصوت: ${msg.slice(0, 200)}`);
+    }
+
+    await execFileAsync("ffmpeg", [
+      "-ss", String(startTime),
+      "-t", String(SEGMENT_DURATION),
+      "-i", tmpFullMp3,
+      "-ar", "22050", "-ac", "1",
+      "-f", "mp3", "-y",
+      outputPath,
+    ], { timeout: 60_000 });
+
+    try { await unlink(tmpFullMp3); } catch {}
+    return;
+  }
+
+  await execFileAsync("ffmpeg", [
+    "-i", tmpMp3,
+    "-ar", "22050", "-ac", "1",
+    "-f", "mp3", "-y",
+    outputPath,
+  ], { timeout: 60_000 });
+
+  try { await unlink(tmpMp3); } catch {}
+}
+
+async function getAudioDuration(audioPath: string): Promise<number> {
+  try {
+    const { stdout } = await execFileAsync("ffprobe", [
+      "-v", "quiet",
+      "-print_format", "json",
+      "-show_streams",
+      audioPath,
+    ], { timeout: 10_000 });
+    const info = JSON.parse(stdout);
+    const dur = parseFloat(info?.streams?.[0]?.duration ?? "0");
+    return isNaN(dur) ? 0 : dur;
+  } catch {
+    return 0;
+  }
+}
+
+async function applyAtempo(inputPath: string, rate: number, outputPath: string): Promise<void> {
+  const clamped = Math.min(MAX_ATEMPO, Math.max(MIN_ATEMPO, rate));
+  let filterStr: string;
+  if (clamped > 2.0) {
+    const half = Math.sqrt(clamped);
+    filterStr = `atempo=${half.toFixed(4)},atempo=${half.toFixed(4)}`;
+  } else {
+    filterStr = `atempo=${clamped.toFixed(4)}`;
+  }
+  await execFileAsync("ffmpeg", [
+    "-i", inputPath,
+    "-filter:a", filterStr,
+    "-y", outputPath,
+  ], { timeout: 30_000 });
+}
+
+const whisperScriptPath = join(
+  workspaceRoot, "artifacts", "api-server", "src", "whisper_local.py"
+);
+
+let localWhisperReady = false;
+const python3Bin = join(workspaceRoot, ".pythonlibs", "bin", "python3");
+
+async function transcribeLocalWhisperJSON(
+  audioPath: string,
+  modelSize = "tiny"
+): Promise<WhisperSentence[]> {
+  const pyBin = existsSync(python3Bin) ? python3Bin : "python3";
+
+  const { stdout, stderr } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    execFile(
+      pyBin,
+      [whisperScriptPath, audioPath, modelSize, "--json"],
+      { timeout: 300_000, maxBuffer: 10 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        const code = (err as any)?.code ?? 0;
+        if (err && code !== 2) {
+          reject(Object.assign(err, { stderr }));
+        } else {
+          resolve({ stdout, stderr });
+        }
+      }
+    );
+  });
+
+  if (stderr) logger.info({ stderr: stderr.slice(0, 800) }, "Whisper pipeline log");
+
+  localWhisperReady = true;
+
+  const raw = stdout.trim();
+  if (!raw || raw === "[]") {
+    throw new Error("لم يُكتشف كلام في هذا المقطع");
+  }
+
+  try {
+    return JSON.parse(raw) as WhisperSentence[];
+  } catch {
+    throw new Error("خطأ في تحليل نتائج Whisper");
+  }
+}
+
+async function translateWithGoogle(text: string): Promise<string> {
+  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ar&dt=t&q=${encodeURIComponent(text)}`;
+  const response = await fetch(url, {
+    headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+  });
+  if (!response.ok) throw new Error(`Google Translate: ${response.status}`);
+  const data = await response.json() as any[][];
+  let result = "";
+  if (Array.isArray(data?.[0])) {
+    for (const part of data[0]) {
+      if (Array.isArray(part) && part[0]) result += part[0];
+    }
+  }
+  if (!result.trim()) throw new Error("Google Translate returned empty result");
+  return result.trim();
+}
+
+async function translateWithPollinations(text: string): Promise<string> {
+  const prompt = `Translate the following text to Arabic. Return only the Arabic translation:\n\n${text}`;
+  const url = `https://text.pollinations.ai/${encodeURIComponent(prompt)}`;
+  const response = await fetch(url, {
+    headers: { "User-Agent": "Mozilla/5.0" },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) throw new Error(`Pollinations: ${response.status}`);
+  const result = await response.text();
+  if (!result.trim()) throw new Error("Pollinations returned empty result");
+  return result.trim();
+}
+
+async function translateWithOpenAI(text: string): Promise<string> {
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: "You are a professional translator. Translate the given text to Arabic. Return only the translated text." },
+      { role: "user", content: text },
+    ],
+    temperature: 0.3,
+    max_tokens: 2048,
+  });
+  return response.choices[0]?.message?.content?.trim() ?? text;
+}
+
+async function translateText(
+  text: string,
+  engine: TranslationEngine,
+  jobId: string
+): Promise<string> {
+  switch (engine) {
+    case "google":
+      return translateWithGoogle(text);
+    case "pollinations":
+      try {
+        return await translateWithPollinations(text);
+      } catch {
+        logger.info({ jobId }, "Pollinations failed, falling back to Google");
+        return translateWithGoogle(text);
+      }
+    case "openai":
+    default:
+      if (isOpenAIConfigured()) {
+        return translateWithOpenAI(text);
+      }
+      return translateWithGoogle(text);
+  }
+}
+
+export async function getVideoInfo(videoUrl: string): Promise<{ title: string | null }> {
+  try {
+    const safeUrl = cleanYouTubeUrl(videoUrl);
+    const { stdout } = await execFileAsync("yt-dlp", [
+      "--print", "%(title)s",
+      "--no-playlist",
+      "--no-check-certificates",
+      "--socket-timeout", "10",
+      safeUrl,
+    ], { timeout: 20_000 });
+    const title = stdout.trim();
+    return { title: title || null };
+  } catch {
+    return { title: null };
+  }
+}
+
+async function processSentence(
+  jobId: string,
+  ws: WhisperSentence,
+  i: number,
+  totalCount: number,
+  voice: string,
+  translationEngine: TranslationEngine,
+  tmpDir: string,
+  perSentenceMap: Map<number, string>,
+  completedCountRef: { value: number }
+): Promise<void> {
+  try {
+    const j1 = getJob(jobId);
+    if (j1?.sentences) {
+      j1.sentences[i] = { ...j1.sentences[i], sentenceStatus: "translating" };
+      updateJob(jobId, { sentences: [...j1.sentences] });
+    }
+
+    const arabicText = await translateText(ws.text, translationEngine, jobId);
+
+    const j2 = getJob(jobId);
+    if (j2?.sentences) {
+      j2.sentences[i] = { ...j2.sentences[i], arabicText, sentenceStatus: "tts" };
+      updateJob(jobId, { sentences: [...j2.sentences] });
+    }
+
+    const ttsRaw   = join(tmpDir, `${jobId}-s${i}-raw.mp3`);
+    const ttsFinal = join(tmpDir, `${jobId}-s${i}-final.mp3`);
+
+    const ttsText = prepareTextForTTS(arabicText);
+
+    let ttsOk = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await synthesizeEdgeTTS(ttsText, voice, 1.0, ttsRaw);
+        if (existsSync(ttsRaw)) { ttsOk = true; break; }
+      } catch (ttsErr: any) {
+        logger.warn({ jobId, i, attempt, err: ttsErr?.message }, "TTS attempt failed");
+        if (attempt < 2) await new Promise(r => setTimeout(r, 1200 * (attempt + 1)));
+      }
+    }
+    if (!ttsOk) throw new Error("فشل توليد الصوت بعد 3 محاولات");
+
+    const ttsDuration      = await getAudioDuration(ttsRaw);
+    if (ttsDuration <= 0) throw new Error("ملف الصوت فارغ");
+
+    const originalDuration = Math.max(0.1, ws.end - ws.start);
+    const rawAtempo        = ttsDuration / originalDuration;
+    const clampedAtempo    = Math.min(MAX_ATEMPO, Math.max(MIN_ATEMPO, rawAtempo));
+
+    logger.info({ jobId, i, originalDuration, ttsDuration, rawAtempo, clampedAtempo }, "Sentence atempo");
+
+    let usedPath = ttsRaw;
+    if (clampedAtempo > 1.04) {
+      try {
+        await applyAtempo(ttsRaw, clampedAtempo, ttsFinal);
+        if (existsSync(ttsFinal)) {
+          usedPath = ttsFinal;
+          try { await unlink(ttsRaw); } catch {}
+        }
+      } catch (atempoErr: any) {
+        logger.warn({ jobId, i, err: atempoErr?.message }, "atempo failed, using raw");
+      }
+    }
+
+    const finalDuration = await getAudioDuration(usedPath);
+    perSentenceMap.set(i, usedPath);
+    completedCountRef.value++;
+
+    const j3 = getJob(jobId);
+    if (j3?.sentences) {
+      j3.sentences[i] = {
+        videoStart:      ws.start,
+        videoEnd:        ws.end,
+        arabicText,
+        audioStart:      0,
+        audioEnd:        finalDuration,
+        audioUrl:        `/api/translate/sentence-audio/${jobId}/${i}`,
+        audioDuration:   finalDuration,
+        sentenceStatus:  "completed",
+        originalDuration,
+        ttsDuration,
+        speedRatio:      clampedAtempo,
+      };
+      updateJob(jobId, {
+        sentences: [...j3.sentences],
+        progress:  `✅ ${completedCountRef.value}/${totalCount} جملة جاهزة`,
+      });
+    }
+
+  } catch (err: any) {
+    logger.warn({ jobId, i, err: err?.message }, "Sentence failed");
+    const j = getJob(jobId);
+    if (j?.sentences) {
+      j.sentences[i] = { ...j.sentences[i], sentenceStatus: "failed" };
+      updateJob(jobId, { sentences: [...j.sentences] });
+    }
+  }
+}
+
+export async function processVideoSegment(options: ProcessOptions): Promise<void> {
+  const {
+    jobId,
+    videoUrl,
+    startTime,
+    voice,
+    translationEngine = "google",
+  } = options;
+
+  const tmpDir = await mkdtemp(join(tmpdir(), "vt-"));
+  const audioInputPath = join(tmpDir, `${jobId}-input.mp3`);
+
+  const perSentenceMap = new Map<number, string>();
+  sentenceAudioMap.set(jobId, perSentenceMap);
+
+  try {
+    const cookiesAvailable = await hasCookies();
+    const cookiesArgs = cookiesAvailable ? ["--cookies", getCookiesPath()] : [];
+    const safeUrl = cleanYouTubeUrl(videoUrl);
+
+    const engineLabel =
+      translationEngine === "google"       ? "Google Translate" :
+      translationEngine === "pollinations" ? "Pollinations AI"  : "OpenAI GPT";
+
+    logger.info({ jobId, startTime, translationEngine }, "Starting parallel per-sentence processing");
+
+    updateJob(jobId, { status: "processing", progress: "تنزيل الصوت من الفيديو..." });
+    await downloadAudioSegment(safeUrl, startTime, audioInputPath, cookiesArgs);
+    if (!existsSync(audioInputPath)) throw new Error("فشل تنزيل الصوت");
+
+    const firstRun = !localWhisperReady;
+    updateJob(jobId, {
+      progress: firstRun
+        ? "تحميل نموذج Whisper (مرة واحدة فقط)..."
+        : "تحليل الصوت وتقطيعه إلى جمل...",
+    });
+
+    const whisperSentences = await transcribeLocalWhisperJSON(audioInputPath, "small");
+    if (whisperSentences.length === 0) throw new Error("لم يُكتشف كلام في هذا المقطع");
+
+    logger.info({ jobId, sentenceCount: whisperSentences.length }, "Whisper sentences found");
+    const transcript = whisperSentences.map(s => s.text).join(" ");
+
+    const pendingSentences: StoredSentence[] = whisperSentences.map(ws => ({
+      videoStart:      ws.start,
+      videoEnd:        ws.end,
+      arabicText:      "",
+      audioStart:      0,
+      audioEnd:        0,
+      audioUrl:        undefined,
+      audioDuration:   undefined,
+      sentenceStatus:  "pending" as const,
+      originalDuration: Math.max(0.1, ws.end - ws.start),
+      ttsDuration:     undefined,
+      speedRatio:      undefined,
+    }));
+
+    const total = whisperSentences.length;
+    const mid   = Math.ceil(total / 2);
+
+    updateJob(jobId, {
+      transcript,
+      sentences: pendingSentences,
+      progress: `معالجة ${total} جملة (نصفين متوازيين) عبر ${engineLabel}...`,
+    });
+
+    const completedCountRef = { value: 0 };
+
+    const firstHalfIndices  = Array.from({ length: mid }, (_, k) => k);
+    const secondHalfIndices = Array.from({ length: total - mid }, (_, k) => k + mid);
+
+    logger.info({ jobId, firstHalf: firstHalfIndices.length, secondHalf: secondHalfIndices.length },
+      "Split into two parallel halves");
+
+    await Promise.all([
+      Promise.all(
+        firstHalfIndices.map(i =>
+          processSentence(jobId, whisperSentences[i], i, total, voice, translationEngine,
+            tmpDir, perSentenceMap, completedCountRef)
+        )
+      ),
+      Promise.all(
+        secondHalfIndices.map(i =>
+          processSentence(jobId, whisperSentences[i], i, total, voice, translationEngine,
+            tmpDir, perSentenceMap, completedCountRef)
+        )
+      ),
+    ]);
+
+    if (perSentenceMap.size === 0) throw new Error("فشل معالجة جميع الجمل");
+
+    const finalSentences = getJob(jobId)?.sentences ?? [];
+    const totalAudioDuration = finalSentences.reduce((sum, s) => sum + (s.audioDuration ?? 0), 0);
+
+    updateJob(jobId, {
+      status:           "completed",
+      progress:         `✅ ${perSentenceMap.size}/${total} جملة جاهزة للتشغيل`,
+      suggestedRate:    1.0,
+      audioDurationSec: totalAudioDuration,
+    });
+
+    logger.info({ jobId, ready: perSentenceMap.size, total }, "Parallel processing complete");
+
+  } catch (err: any) {
+    const msg = err?.message || "خطأ غير معروف";
+    logger.error({ jobId, err: msg }, "Parallel processing failed");
+    updateJob(jobId, { status: "failed", progress: `❌ ${msg}`, error: msg });
+  } finally {
+    try { if (existsSync(audioInputPath)) await unlink(audioInputPath); } catch {}
+  }
+}
+
+
+================================================================
+artifacts/api-server/src/whisper_local.py
+================================================================
+#!/usr/bin/env python3
+"""
+Advanced audio transcription pipeline:
+  Audio Input -> VAD -> faster-whisper -> Post-processing -> Output
+
+Usage:
+  python3 whisper_local.py <audio_file> [model_size]          # plain text output
+  python3 whisper_local.py <audio_file> [model_size] --json   # JSON [{start,end,text}]
+
+Exit codes: 0=ok, 2=no speech
+"""
+import sys
+import os
+import re
+import json
+import warnings
+warnings.filterwarnings("ignore")
+
+
+FILLER_WORDS = {
+    "uh", "um", "hmm", "hm",
+}
+
+
+def post_process(text: str) -> str:
+    words = text.split()
+    cleaned = []
+    for w in words:
+        stripped = w.strip(".,!?;:-").lower()
+        if stripped not in FILLER_WORDS:
+            cleaned.append(w)
+    result = " ".join(cleaned)
+    result = re.sub(r"\[.*?\]", "", result)
+    result = re.sub(r"\(.*?\)", "", result)
+    result = re.sub(r"\s+", " ", result)
+    return result.strip()
+
+
+def transcribe(audio_path: str, model_size: str = "small", return_json: bool = False):
+    from faster_whisper import WhisperModel
+
+    file_size = os.path.getsize(audio_path)
+    print(f"[pipeline] start model={model_size} size={file_size}B", file=sys.stderr)
+
+    model = WhisperModel(
+        model_size,
+        device="cpu",
+        compute_type="int8",
+        download_root=os.path.expanduser("~/.cache/whisper"),
+    )
+
+    print("[pipeline] model loaded -- VAD + transcribing...", file=sys.stderr)
+
+    def run_transcription(use_vad: bool, threshold: float = 0.20):
+        segs, inf = model.transcribe(
+            audio_path,
+            beam_size=5,
+            best_of=5,
+            language=None,  # auto-detect language
+            condition_on_previous_text=True,
+            word_timestamps=True,
+            no_speech_threshold=0.7,
+            log_prob_threshold=-1.2,
+            compression_ratio_threshold=2.8,
+            vad_filter=use_vad,
+            vad_parameters={
+                "min_silence_duration_ms": 200,
+                "speech_pad_ms": 400,
+                "threshold": threshold,
+            } if use_vad else {},
+        )
+        return list(segs), inf
+
+    # First attempt: VAD enabled with lower threshold (catches quiet speech)
+    segments_list, info = run_transcription(use_vad=True, threshold=0.20)
+
+    # Fallback 1: even lower threshold if too few results
+    if len(segments_list) == 0:
+        print("[pipeline] retry with threshold=0.10", file=sys.stderr)
+        segments_list, info = run_transcription(use_vad=True, threshold=0.10)
+
+    # Fallback 2: no VAD at all
+    if len(segments_list) == 0:
+        print("[pipeline] retry without VAD", file=sys.stderr)
+        segments_list, info = run_transcription(use_vad=False)
+
+    print(
+        f"[pipeline] lang={info.language} prob={info.language_probability:.2f}",
+        file=sys.stderr,
+    )
+
+    sentences = []
+    all_texts = []
+    total_words = 0
+
+    for seg in segments_list:
+        raw = seg.text.strip()
+        if not raw:
+            continue
+
+        cleaned = post_process(raw)
+        if not cleaned:
+            continue
+
+        word_count = len(seg.words) if seg.words else 0
+        total_words += word_count
+        print(
+            f"[pipeline] [{seg.start:.1f}-{seg.end:.1f}] words={word_count} | {cleaned[:60]}",
+            file=sys.stderr,
+        )
+
+        words_list = []
+        if seg.words:
+            for w in seg.words:
+                words_list.append({
+                    "word": w.word.strip(),
+                    "start": round(w.start, 3),
+                    "end": round(w.end, 3),
+                })
+
+        sentences.append({
+            "start": round(seg.start, 3),
+            "end": round(seg.end, 3),
+            "text": cleaned,
+            "words": words_list,
+        })
+        all_texts.append(cleaned)
+
+    print(
+        f"[pipeline] done segs={len(sentences)} words={total_words}",
+        file=sys.stderr,
+    )
+
+    if return_json:
+        return sentences
+
+    result = " ".join(all_texts)
+    result = re.sub(r"\s+", " ", result).strip()
+    return result
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: whisper_local.py <audio_file> [model_size] [--json]", file=sys.stderr)
+        sys.exit(1)
+
+    audio_file = sys.argv[1]
+    model_size = "small"
+    use_json = False
+
+    for arg in sys.argv[2:]:
+        if arg == "--json":
+            use_json = True
+        elif not arg.startswith("-"):
+            model_size = arg
+
+    if not os.path.exists(audio_file):
+        print(f"File not found: {audio_file}", file=sys.stderr)
+        sys.exit(1)
+
+    result = transcribe(audio_file, model_size, return_json=use_json)
+
+    if use_json:
+        if result:
+            print(json.dumps(result, ensure_ascii=False), end="")
+        else:
+            print("[]", end="")
+            sys.exit(2)
+    else:
+        if result:
+            print(result, end="")
+        else:
+            print("[no speech detected]", end="")
+            sys.exit(2)
+
+
+================================================================
+lib/api-spec/openapi.yaml
+================================================================
+openapi: 3.1.0
+info:
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: translate
+    description: Video translation operations
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /translate/process:
+    post:
+      operationId: processVideo
+      tags: [translate]
+      summary: Process video segment
+      description: Extract, transcribe, translate and synthesize speech for a 60-second video segment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProcessVideoRequest"
+      responses:
+        "200":
+          description: Job created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessVideoResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /translate/status/{jobId}:
+    get:
+      operationId: getJobStatus
+      tags: [translate]
+      summary: Get job processing status
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Job status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobStatusResponse"
+        "404":
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /translate/models:
+    get:
+      operationId: getTtsModels
+      tags: [translate]
+      summary: Get available TTS models and voices
+      responses:
+        "200":
+          description: Models list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TtsModelsResponse"
+
+  /translate/cookies/status:
+    get:
+      operationId: getCookiesStatus
+      tags: [translate]
+      summary: Check if YouTube cookies are saved
+      responses:
+        "200":
+          description: Cookies status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CookiesStatusResponse"
+
+  /translate/cookies:
+    post:
+      operationId: saveCookies
+      tags: [translate]
+      summary: Save YouTube cookies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SaveCookiesRequest"
+      responses:
+        "200":
+          description: Cookies saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      operationId: deleteCookies
+      tags: [translate]
+      summary: Delete saved YouTube cookies
+      responses:
+        "200":
+          description: Cookies deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    ProcessVideoRequest:
+      type: object
+      properties:
+        videoUrl:
+          type: string
+        startTime:
+          type: number
+        voice:
+          type: string
+        translationEngine:
+          type: string
+          enum: [openai, google, pollinations]
+        forceAudioExtraction:
+          type: boolean
+      required:
+        - videoUrl
+        - startTime
+        - voice
+
+    ProcessVideoResponse:
+      type: object
+      properties:
+        jobId:
+          type: string
+        status:
+          type: string
+        message:
+          type: string
+      required:
+        - jobId
+        - status
+        - message
+
+    JobStatusResponse:
+      type: object
+      properties:
+        jobId:
+          type: string
+        status:
+          type: string
+          enum: [pending, processing, completed, failed]
+        progress:
+          type: string
+        audioUrl:
+          type: string
+          nullable: true
+        transcript:
+          type: string
+          nullable: true
+        translation:
+          type: string
+          nullable: true
+        error:
+          type: string
+          nullable: true
+        startTime:
+          type: number
+          nullable: true
+        suggestedRate:
+          type: number
+          nullable: true
+        audioDurationSec:
+          type: number
+          nullable: true
+      required:
+        - jobId
+        - status
+        - progress
+
+    TtsVoice:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        lang:
+          type: string
+      required:
+        - id
+        - name
+        - lang
+
+    TtsModelsResponse:
+      type: object
+      properties:
+        voices:
+          type: array
+          items:
+            $ref: "#/components/schemas/TtsVoice"
+      required:
+        - voices
+
+    CookiesStatusResponse:
+      type: object
+      properties:
+        hasCookies:
+          type: boolean
+      required:
+        - hasCookies
+
+    SaveCookiesRequest:
+      type: object
+      properties:
+        cookies:
+          type: string
+      required:
+        - cookies
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+      required:
+        - success
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+      required:
+        - error
+        - message
+
+================================================================
+نهاية التوثيق - جميع الملفات المذكورة أعلاه تحتوي على الكود الكامل
+================================================================
