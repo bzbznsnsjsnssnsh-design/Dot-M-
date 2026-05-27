@@ -20,12 +20,15 @@ if (!process.env.PATH?.includes(pythonLibsPath)) {
   process.env.PATH = `${pythonLibsPath}:${process.env.PATH || ""}`;
 }
 
-function discoverNixBin(pkgPattern: string): string | null {
+function discoverNixBin(pkgPattern: string, excludePatterns: string[] = ["-dist"]): string | null {
   try {
     const nixStore = "/nix/store";
     const entries = readdirSync(nixStore);
     const matches = entries
-      .filter((e) => e.includes(pkgPattern) && !e.includes("python") && !e.includes("-dist"))
+      .filter((e) => {
+        if (!e.includes(pkgPattern)) return false;
+        return excludePatterns.every(ex => !e.includes(ex));
+      })
       .sort()
       .reverse();
     for (const match of matches) {
@@ -36,10 +39,49 @@ function discoverNixBin(pkgPattern: string): string | null {
   return null;
 }
 
-const ytDlpBinDir = discoverNixBin("yt-dlp");
+// Discover yt-dlp (exclude python packages that happen to match)
+const ytDlpBinDir = discoverNixBin("yt-dlp", ["-dist", "python"]);
 if (ytDlpBinDir && !process.env.PATH?.includes(ytDlpBinDir)) {
   process.env.PATH = `${ytDlpBinDir}:${process.env.PATH || ""}`;
   logger.info({ ytDlpBinDir }, "Added yt-dlp to PATH");
+}
+
+// Discover Python3 — prefers the workspace venv (with packages installed),
+// falls back to Replit pythonlibs, then bare Nix store interpreter.
+function discoverPython3(): string | null {
+  const candidates = [
+    // workspace venv (uv-managed, has faster-whisper + edge-tts)
+    join(workspaceRoot, ".venv", "bin", "python3"),
+    // Replit pythonlibs (pip install target)
+    join(workspaceRoot, ".pythonlibs", "bin", "python3"),
+    join(homedir(), ".pythonlibs", "bin", "python3"),
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  // Search Nix store for python3-3.11.x bare interpreter
+  try {
+    const nixStore = "/nix/store";
+    const entries = readdirSync(nixStore);
+    const matches = entries
+      .filter(e => /^[a-z0-9]+-python3-3\.(11|12|13)\.\d+$/.test(e))
+      .sort()
+      .reverse();
+    for (const match of matches) {
+      const bin = `${nixStore}/${match}/bin/python3`;
+      if (existsSync(bin)) return bin;
+    }
+  } catch {}
+  return null;
+}
+
+const python3BinDiscovered = discoverPython3();
+if (python3BinDiscovered) {
+  const python3BinDir = python3BinDiscovered.replace(/\/python3$/, "");
+  if (!process.env.PATH?.includes(python3BinDir)) {
+    process.env.PATH = `${python3BinDir}:${process.env.PATH || ""}`;
+  }
+  logger.info({ python3Bin: python3BinDiscovered }, "Discovered Python3");
 }
 
 const SEGMENT_DURATION = 60;
@@ -292,7 +334,61 @@ const whisperScriptPath = join(
 );
 
 let localWhisperReady = false;
-const python3Bin = join(workspaceRoot, ".pythonlibs", "bin", "python3");
+// Use discovered Python (venv or Nix) rather than hardcoded path
+const python3Bin = python3BinDiscovered ?? join(workspaceRoot, ".pythonlibs", "bin", "python3");
+
+// ── Discover shared-library paths needed by pip-installed PyAV on NixOS ──────
+// NixOS does not have /lib/x86_64-linux-gnu, so pip wheels (manylinux) that
+// link against libz.so.1 / libstdc++.so.6 need these injected via LD_LIBRARY_PATH.
+function discoverNixLib(pkgGlob: string, libFile: string, require64bit = true): string | null {
+  try {
+    const nixStore = "/nix/store";
+    const entries = readdirSync(nixStore);
+    const matches = entries
+      .filter(e => e.includes(pkgGlob) && !e.endsWith(".drv"))
+      .sort()
+      .reverse();
+    for (const match of matches) {
+      const libDir = `${nixStore}/${match}/lib`;
+      const fullPath = `${libDir}/${libFile}`;
+      if (!existsSync(fullPath)) continue;
+      if (require64bit) {
+        // Quick heuristic: skip 32-bit paths that contain "32" in the package name
+        if (match.includes("-32-") || match.includes("i686") || match.includes("32bit")) continue;
+        // Verify ELF class via first 5 bytes: 0x7f 'E' 'L' 'F' then 1=32bit, 2=64bit
+        try {
+          const buf = Buffer.alloc(5);
+          const fd = require("fs").openSync(fullPath, "r");
+          require("fs").readSync(fd, buf, 0, 5, 0);
+          require("fs").closeSync(fd);
+          if (buf[4] !== 2) continue; // not ELF64
+        } catch { continue; }
+      }
+      return libDir;
+    }
+  } catch {}
+  return null;
+}
+
+function buildPythonLdLibraryPath(): string {
+  const existing = process.env.LD_LIBRARY_PATH || "";
+  const extras: string[] = [];
+
+  const zlibDir = discoverNixLib("zlib-1.", "libz.so.1", true);
+  if (zlibDir) extras.push(zlibDir);
+
+  // gcc-lib: need 64-bit libstdc++.so.6 — prefer newer gcc version
+  const gccLibDir = discoverNixLib("gcc-", "libstdc++.so.6", true);
+  if (gccLibDir) extras.push(gccLibDir);
+
+  if (extras.length === 0) return existing;
+  return [...extras, ...(existing ? [existing] : [])].join(":");
+}
+
+const pythonLdLibraryPath = buildPythonLdLibraryPath();
+if (pythonLdLibraryPath) {
+  logger.info({ pythonLdLibraryPath }, "Built LD_LIBRARY_PATH for Python/PyAV");
+}
 
 async function transcribeLocalWhisperJSON(
   audioPath: string,
@@ -307,11 +403,16 @@ async function transcribeLocalWhisperJSON(
     pyArgs.push("--lang", sourceLanguage.trim());
   }
 
+  // Inject LD_LIBRARY_PATH so pip-installed PyAV finds libz + libstdc++ on NixOS
+  const pyEnv = pythonLdLibraryPath
+    ? { ...process.env, LD_LIBRARY_PATH: pythonLdLibraryPath }
+    : process.env;
+
   const { stdout, stderr } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
     execFile(
       pyBin,
       pyArgs,
-      { timeout: 300_000, maxBuffer: 10 * 1024 * 1024 },
+      { timeout: 300_000, maxBuffer: 10 * 1024 * 1024, env: pyEnv },
       (err, stdout, stderr) => {
         const code = (err as any)?.code ?? 0;
         if (err && code !== 2) {
