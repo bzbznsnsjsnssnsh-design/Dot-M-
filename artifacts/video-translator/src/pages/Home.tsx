@@ -1,9 +1,10 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import YouTube from 'react-youtube';
 import {
-  Play, Square, Youtube, Volume2, Loader2, CheckCircle2,
+  Play, Square, Youtube, Volume2, VolumeX, Loader2, CheckCircle2,
   Cookie, ChevronDown, ChevronUp, Trash2, Globe, BookOpen,
   SkipBack, SkipForward, Clock, Mic, Maximize2, Video,
+  MessageCircle, Send, X, Bot, User,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -21,10 +22,10 @@ import {
 } from '@/components/ui/select';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const SEGMENT_STEP  = 59;   // seconds per segment (fixed — no more ABC system)
+const SEGMENT_STEP  = 59;
 const POLL_MS       = 600;
 const MAX_RETRIES   = 2;
-const NAV_GRACE_MS  = 1500; // after sentence nav, block auto-switching for this long
+const NAV_GRACE_MS  = 1500;
 
 type TranslationEngine = 'openai' | 'google' | 'pollinations' | 'groq';
 type SentenceStatus    = 'pending' | 'translating' | 'tts' | 'completed' | 'failed';
@@ -41,7 +42,7 @@ interface StoredSentence {
   originalDuration?: number;
   ttsDuration?:     number;
   speedRatio?:      number;
-  videoSlowRatio?:  number;  // < 1.0 = video must slow to maintain sync
+  videoSlowRatio?:  number;
 }
 
 interface SegJob {
@@ -51,6 +52,11 @@ interface SegJob {
   suggestedRate:    number | null;
   audioDurationSec: number | null;
   sentences:        StoredSentence[] | null;
+}
+
+interface AiMessage {
+  role: 'user' | 'assistant';
+  text: string;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -67,7 +73,6 @@ function getSegStart(videoTime: number, step: number): number {
   return Math.floor(videoTime / step) * step;
 }
 
-// Sentence status → short label
 function statusLabel(st?: SentenceStatus): string {
   if (st === 'translating') return '🌍';
   if (st === 'tts')         return '🔊';
@@ -233,7 +238,6 @@ const WHISPER_LANGUAGES: { code: string; name: string; nameAr: string }[] = [
   { code: 'zu', name: 'Zulu',         nameAr: 'الزولو' },
 ];
 
-// ─── Static data ──────────────────────────────────────────────────────────────
 const TRANSLATION_ENGINES: { value: TranslationEngine; label: string; description: string; free: boolean }[] = [
   { value: 'google',       label: 'Google Translate', description: 'مجاني • سريع',                    free: true  },
   { value: 'pollinations', label: 'Pollinations AI',  description: 'مجاني • ذكاء اصطناعي',            free: true  },
@@ -250,7 +254,7 @@ export default function Home() {
   const ytRef               = useRef<any>(null);
   const videoRef            = useRef<HTMLVideoElement>(null);
   const audioRef            = useRef<HTMLAudioElement>(null);
-  const preloadRef          = useRef<HTMLAudioElement>(null); // preloads next sentence
+  const preloadRef          = useRef<HTMLAudioElement>(null);
   const jobsRef             = useRef<Map<number, SegJob>>(new Map());
   const activeSegRef        = useRef<number>(-1);
   const stopRequestedRef    = useRef(false);
@@ -268,9 +272,11 @@ export default function Home() {
   const currentSentTextRef   = useRef<string | null>(null);
   const navGraceRef          = useRef<number>(0);
   const pendingCanplayRef   = useRef<(() => void) | null>(null);
-  const preloadTriggeredRef = useRef<string>(''); // tracks last preloaded URL
+  const preloadTriggeredRef = useRef<string>('');
   const syncLoopRef         = useRef<ReturnType<typeof setInterval> | null>(null);
-  const videoRateRef        = useRef<number>(1.0);  // track applied video playback rate
+  const videoRateRef        = useRef<number>(1.0);
+  const autoMutedRef        = useRef(false);   // tracks if we muted the video
+  const aiChatBottomRef     = useRef<HTMLDivElement>(null);
 
   // ── state ─────────────────────────────────────────────────────────────────
   const [jobs,                setJobs]               = useState<Map<number, SegJob>>(new Map());
@@ -281,7 +287,7 @@ export default function Home() {
   const [duration,            setDuration]           = useState(0);
   const [selectedVoice,       setSelectedVoice]      = useState('');
   const [selectedEngine,      setSelectedEngine]     = useState<TranslationEngine>('google');
-  const [selectedLanguage,    setSelectedLanguage]   = useState('');        // '' = Auto Detect
+  const [selectedLanguage,    setSelectedLanguage]   = useState('');
   const [langSearch,          setLangSearch]         = useState('');
   const [showLangDropdown,    setShowLangDropdown]   = useState(false);
   const [hasStarted,          setHasStarted]         = useState(false);
@@ -294,6 +300,13 @@ export default function Home() {
   const [cookieText,          setCookieText]         = useState('');
   const [hasCookies,          setHasCookies]         = useState(false);
   const [cookiesSaving,       setCookiesSaving]      = useState(false);
+  const [muteOriginal,        setMuteOriginal]       = useState(true);  // كتم الصوت الأصلي
+
+  // ── AI chat state ─────────────────────────────────────────────────────────
+  const [showAiPanel,   setShowAiPanel]   = useState(false);
+  const [aiMessages,    setAiMessages]    = useState<AiMessage[]>([]);
+  const [aiInput,       setAiInput]       = useState('');
+  const [aiLoading,     setAiLoading]     = useState(false);
 
   const { data: modelsData } = useGetTtsModels();
 
@@ -304,7 +317,6 @@ export default function Home() {
       setSelectedVoice(modelsData.voices[0].id);
   }, [modelsData, selectedVoice]);
 
-  // ── Fetch video title when URL changes ────────────────────────────────────
   useEffect(() => {
     if (!isValid || !videoId) { setVideoTitle(null); return; }
     let cancelled = false;
@@ -315,10 +327,28 @@ export default function Home() {
   }, [url, isValid, videoId]);
 
   const activeJob = activeSeg >= 0 ? jobs.get(activeSeg) : undefined;
-
   const syncJobs = useCallback(() => setJobs(new Map(jobsRef.current)), []);
 
-  // ── Cancel any pending canplay listener ──────────────────────────────────
+  // ── Mute / unmute original video ─────────────────────────────────────────
+  const muteVideo = useCallback(() => {
+    if (videoRef.current) videoRef.current.muted = true;
+    else { try { ytRef.current?.mute?.(); } catch {} }
+    autoMutedRef.current = true;
+  }, []);
+
+  const unmuteVideo = useCallback(() => {
+    if (videoRef.current) videoRef.current.muted = false;
+    else { try { ytRef.current?.unMute?.(); } catch {} }
+    autoMutedRef.current = false;
+  }, []);
+
+  // Keep mute in sync with toggle while running
+  useEffect(() => {
+    if (!isRunning) return;
+    if (muteOriginal) muteVideo(); else unmuteVideo();
+  }, [muteOriginal, isRunning, muteVideo, unmuteVideo]);
+
+  // ── Cancel any pending canplay listener ───────────────────────────────────
   const cancelPendingLoad = useCallback(() => {
     const audio = audioRef.current;
     if (audio && pendingCanplayRef.current) {
@@ -327,9 +357,7 @@ export default function Home() {
     }
   }, []);
 
-  // ── Preload next sentence into hidden preload element ─────────────────────
-  // Called while current sentence is still playing so the audio file is
-  // already buffered/cached when we actually need to play it → zero gap.
+  // ── Preload next sentence ─────────────────────────────────────────────────
   const preloadSentenceAudio = useCallback((seg: number, sentIdx: number) => {
     const job  = jobsRef.current.get(seg);
     const sent = job?.sentences?.[sentIdx];
@@ -337,24 +365,21 @@ export default function Home() {
     const el = preloadRef.current;
     if (!el) return;
     const target = new URL(sent.audioUrl, window.location.href).href;
-    if (preloadTriggeredRef.current === target) return; // already preloading
+    if (preloadTriggeredRef.current === target) return;
     preloadTriggeredRef.current = target;
     el.src = sent.audioUrl;
     el.preload = 'auto';
     el.load();
   }, []);
 
-  // ── Apply video playback rate (slow-down when atempo was clamped) ────────────
+  // ── Apply video playback rate ─────────────────────────────────────────────
   const applyVideoRate = useCallback((rate: number) => {
     const clamped = Math.max(0.25, Math.min(2.0, rate));
-    if (Math.abs(videoRateRef.current - clamped) < 0.01) return; // no change needed
+    if (Math.abs(videoRateRef.current - clamped) < 0.01) return;
     videoRateRef.current = clamped;
-
     if (videoRef.current) {
-      // HTML5 video: supports any rate
       videoRef.current.playbackRate = clamped;
     } else if (ytRef.current?.setPlaybackRate) {
-      // YouTube: only supports specific values: 0.25, 0.5, 0.75, 1, 1.25, 1.5
       const ytRates = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5];
       const nearest = ytRates.reduce((a, b) =>
         Math.abs(b - clamped) < Math.abs(a - clamped) ? b : a
@@ -363,7 +388,7 @@ export default function Home() {
     }
   }, []);
 
-  // ── Load a sentence and play — checks preload cache for instant start ──────
+  // ── Load & play a sentence audio (with offset for mid-sentence entry) ─────
   const loadSentenceAudio = useCallback((
     seg: number,
     sentIdx: number,
@@ -390,45 +415,34 @@ export default function Home() {
       setCurrentSpeedInfo(null);
     }
 
-    // ── إبطاء الفيديو عند الحاجة ──────────────────────────────────────────────
-    // إذا كانت سرعة الصوت الأصلية أكبر من 1.5، يُبطأ الفيديو للحفاظ على المزامنة
-    const vsr = sent?.videoSlowRatio ?? 1.0;
-    applyVideoRate(vsr);
-
     const targetHref = new URL(audioUrl, window.location.href).href;
 
-    // ── Case 1: same URL already in main player → seek & play instantly
+    // Case 1: same URL already loaded → seek & play
     if (audio.src === targetHref && !audio.ended) {
-      audio.currentTime = startTime;
+      if (startTime > 0) audio.currentTime = startTime;
       if (audio.paused) audio.play().catch(() => {});
-      // Preload the sentence after this one
       preloadSentenceAudio(seg, sentIdx + 1);
       return;
     }
 
-    // ── Case 2: this URL was preloaded → audio is already in HTTP cache,
-    //    canplay fires almost immediately (browser reads from cache)
+    // Case 2: preloaded → instant start
     const preloadEl = preloadRef.current;
     const preloadHref = preloadEl?.src ? new URL(preloadEl.src, window.location.href).href : '';
-    const isPreloaded = preloadHref === targetHref && !!preloadEl &&
-                        preloadEl.readyState >= 2; // HAVE_CURRENT_DATA or better
+    const isPreloaded = preloadHref === targetHref && !!preloadEl && preloadEl.readyState >= 2;
 
     if (isPreloaded) {
-      // Copy preload element's buffered data by reassigning src — browser cache
-      // means this is instant (readyState ≥ 2 already)
       audio.src = audioUrl;
-      audio.currentTime = startTime;
+      audio.currentTime = Math.max(0, startTime);
       audio.play().catch(() => {});
-      // Clear preload tracking so next sentence can be queued
       preloadTriggeredRef.current = '';
       preloadSentenceAudio(seg, sentIdx + 1);
       return;
     }
 
-    // ── Case 3: not preloaded → load normally with canplay listener
+    // Case 3: load normally
     const onReady = () => {
       pendingCanplayRef.current = null;
-      audio.currentTime = startTime;
+      audio.currentTime = Math.max(0, startTime);
       audio.play().catch(() => {});
     };
     pendingCanplayRef.current = onReady;
@@ -436,13 +450,10 @@ export default function Home() {
     audio.src = audioUrl;
     audio.load();
 
-    // Still preload the one after
     preloadSentenceAudio(seg, sentIdx + 1);
   }, [cancelPendingLoad, preloadSentenceAudio]);
 
-  // ── Jump to next / previous sentence ─────────────────────────────────────
-  // Much simpler than before: just swap audio file + seek video + nav grace.
-  // No correctDrift, no jumpGrace complex phases, no targetSentenceVideoTimeRef.
+  // ── Jump to next/previous sentence ────────────────────────────────────────
   const jumpToSentence = useCallback((delta: 1 | -1) => {
     const seg = playingSegRef.current;
     if (seg < 0) return;
@@ -465,7 +476,6 @@ export default function Home() {
     if (videoRef.current) videoRef.current.currentTime = seekTime;
     else ytRef.current?.seekTo(seekTime, true);
 
-    // Reset seek detector so the jump doesn't trigger seek-reset logic
     lastSeekCheckRef.current = seekTime;
   }, [loadSentenceAudio]);
 
@@ -490,26 +500,27 @@ export default function Home() {
     }
   }, []);
 
-  // ── Audio-led sync (100ms loop + audio.ended handler) ─────────────────────
+  // ── VIDEO-LED SYNC LOOP ────────────────────────────────────────────────────
   //
-  // DESIGN:
-  //   • audio.ended is PRIMARY driver: each sentence plays fully, then loads next.
-  //   • sync loop handles: initial trigger, display text, and "catch-up" when
-  //     video jumps 2+ sentences ahead of audio cursor.
-  //   • Per-sentence atempo is calculated in processor.ts — no global speed.
+  // DESIGN (v2 — fully video-led):
+  //   • Video time is the SINGLE source of truth for what sentence is active.
+  //   • Subtitle text ALWAYS reflects the sentence the video is currently in.
+  //   • Audio switches immediately when video enters a new sentence window.
+  //   • Drift correction: expectedAudioPos = videoProgress / videoSlowRatio
+  //   • Large drift (>250ms) → seek audio; small drift → rate correction.
+  //   • Original video audio is muted while TTS is active.
   //
-  // This guarantees every sentence is read in full before advancing.
   const startSyncLoop = useCallback(() => {
     if (syncLoopRef.current) clearInterval(syncLoopRef.current);
+
     syncLoopRef.current = setInterval(() => {
-      // Support both YouTube player and HTML5 video element
       const videoTime = videoRef.current
         ? videoRef.current.currentTime
         : (ytRef.current?.getCurrentTime?.() ?? 0);
 
       if (!ytRef.current && !videoRef.current) return;
 
-      // ── Seek detection: reset audio when user jumps >3s ───────────────────
+      // ── Seek detection: reset audio when user jumps >3s ──────────────────
       const lastSC = lastSeekCheckRef.current;
       if (lastSC >= 0 && Math.abs(videoTime - lastSC) > 3.0) {
         const aud = audioRef.current;
@@ -527,8 +538,8 @@ export default function Home() {
       }
       lastSeekCheckRef.current = videoTime;
 
-      const step      = stepRef.current;
-      const seg       = getSegStart(videoTime, step);
+      const step = stepRef.current;
+      const seg  = getSegStart(videoTime, step);
 
       activeSegRef.current = seg;
       setActiveSeg(seg);
@@ -541,7 +552,6 @@ export default function Home() {
         s => relTime >= s.videoStart && relTime < s.videoEnd
       );
 
-      // Track video position for audio catch-up
       videoSentIdxRef.current = sentenceIdx;
 
       if (Date.now() < navGraceRef.current) {
@@ -553,89 +563,89 @@ export default function Home() {
       const audioActive = !!(audio && !audio.paused && !audio.ended && audio.src);
 
       if (sentenceIdx >= 0) {
-        const s       = job.sentences[sentenceIdx];
-        const newText = s.arabicText || null;
+        const s = job.sentences[sentenceIdx];
 
-        // ── Always keep display text current ──────────────────────────────
-        const displayIdx = Math.max(sentenceIdx, audioLoadedForSent.current);
-        if (displayIdx !== currentSentIdxRef.current) {
-          currentSentIdxRef.current = displayIdx;
-          setCurrentSentenceIdx(displayIdx);
+        // ── 1. SUBTITLE always from video time (not audio position) ─────────
+        if (sentenceIdx !== currentSentIdxRef.current) {
+          currentSentIdxRef.current = sentenceIdx;
+          setCurrentSentenceIdx(sentenceIdx);
         }
-        if (newText && newText !== currentSentTextRef.current) {
+        const newText = s.arabicText || null;
+        if (newText !== currentSentTextRef.current) {
           currentSentTextRef.current = newText;
           setCurrentSentence(newText);
         }
+        if (s.originalDuration && s.ttsDuration && s.speedRatio &&
+            (s.originalDuration !== (currentSpeedInfo?.orig ?? -1))) {
+          setCurrentSpeedInfo({ orig: s.originalDuration, tts: s.ttsDuration, ratio: s.speedRatio });
+        }
 
-        const audioCursor = audioLoadedForSent.current;
+        // ── 2. Apply per-sentence video rate ────────────────────────────────
+        const vsr = s.videoSlowRatio ?? 1.0;
+        applyVideoRate(vsr);
 
-        // ── Load pending sentence once it becomes ready ────────────────────
-        // audio.ended set pendingNextSentRef when next sentence wasn't ready yet.
+        // ── 3. Handle pending sentence (waiting for audio to be ready) ──────
         const pending = pendingNextSentRef.current;
-        if (pending >= 0 && !audioActive) {
-          const pendingS = job.sentences[pending];
-          if (pendingS?.audioUrl && pendingS.sentenceStatus === 'completed') {
+        if (pending >= 0 && pending === sentenceIdx) {
+          const ps = job.sentences[pending];
+          if (ps?.audioUrl && ps.sentenceStatus === 'completed') {
             pendingNextSentRef.current = -1;
-            loadSentenceAudio(seg, pending, pendingS.audioUrl, 0);
+            // fall through to load it below
+          } else {
+            lastVideoTimeRef.current = videoTime;
+            return; // still waiting
+          }
+        } else if (pending >= 0 && sentenceIdx > pending + 1) {
+          pendingNextSentRef.current = -1; // give up on stale pending
+        }
+
+        if (s.audioUrl && s.sentenceStatus === 'completed') {
+          // Expected audio cursor given video position within this sentence.
+          // Formula: expectedPos = videoProgress / videoSlowRatio
+          // This works because: audioDuration = originalDuration / videoSlowRatio
+          const videoProgress    = Math.max(0, relTime - s.videoStart);
+          const expectedAudioPos = videoProgress / vsr;
+
+          // ── 4. Switch audio immediately when sentence changes ─────────────
+          if (audioLoadedForSent.current !== sentenceIdx) {
+            const safeStart = Math.min(
+              expectedAudioPos,
+              Math.max(0, (s.audioDuration ?? s.originalDuration ?? 0) - 0.1)
+            );
+            loadSentenceAudio(seg, sentenceIdx, s.audioUrl, Math.max(0, safeStart));
             lastVideoTimeRef.current = videoTime;
             return;
           }
-          // Still not ready — but if video is 2+ ahead, give up and catch up
-          if (sentenceIdx > pending + 1) {
-            pendingNextSentRef.current = -1;
-            // fall through to catch-up below
-          } else {
-            lastVideoTimeRef.current = videoTime;
-            return; // keep waiting
-          }
-        }
 
-        // ── Catch-up: video jumped 2+ sentences ahead of audio ────────────
-        if (sentenceIdx > audioCursor + 1 && !audioActive) {
-          if (s.audioUrl && s.sentenceStatus === 'completed') {
-            loadSentenceAudio(seg, sentenceIdx, s.audioUrl, 0);
-          }
-          lastVideoTimeRef.current = videoTime;
-          return;
-        }
+          // ── 5. Drift correction (video-driven) ────────────────────────────
+          if (audioActive && audio) {
+            const error = expectedAudioPos - audio.currentTime;
 
-        // ── Initial start: nothing playing yet ────────────────────────────
-        if (!audioActive && audioCursor < 0 && pending < 0) {
-          if (s.audioUrl && s.sentenceStatus === 'completed') {
-            loadSentenceAudio(seg, sentenceIdx, s.audioUrl, 0);
-          }
-        }
-
-        // ── Resume if paused on same sentence (e.g., after buffering) ──────
-        if (!audioActive && audioCursor === sentenceIdx) {
-          const a = audioRef.current;
-          if (a && a.src && !a.ended && a.paused) a.play().catch(() => {});
-        }
-
-        // ── Real-time playbackRate: keep audio in sync with video ──────────
-        if (audioActive && audio) {
-          const sentInfo = job.sentences[audioLoadedForSent.current];
-          if (sentInfo) {
-            const videoProgress = Math.max(0, (videoTime - seg) - sentInfo.videoStart);
-            const audioProgress = audio.currentTime;
-            const error = videoProgress - audioProgress;
-            if (Math.abs(error) > 0.08) {
-              const newRate = Math.max(0.65, Math.min(2.1, 1.0 + 0.5 * error));
-              if (Math.abs((audio.playbackRate || 1.0) - newRate) > 0.04) {
-                audio.playbackRate = newRate;
+            if (Math.abs(error) > 0.30) {
+              // Large drift → seek audio directly
+              const seekTo = Math.max(0, Math.min(
+                expectedAudioPos,
+                (audio.duration || 999) - 0.05
+              ));
+              audio.currentTime = seekTo;
+              audio.playbackRate = 1.0;
+            } else if (Math.abs(error) > 0.06) {
+              // Small drift → adjust playback rate (gentle correction)
+              const corrRate = Math.max(0.65, Math.min(2.0, 1.0 + error * 2.5));
+              if (Math.abs((audio.playbackRate || 1.0) - corrRate) > 0.03) {
+                audio.playbackRate = corrRate;
               }
-            } else if (Math.abs((audio.playbackRate || 1.0) - 1.0) > 0.04) {
+            } else if (Math.abs((audio.playbackRate || 1.0) - 1.0) > 0.03) {
               audio.playbackRate = 1.0;
             }
 
-            // ── Proactive preload: when < 0.8s left, fetch next sentence ──
+            // ── Proactive preload: < 0.8s remaining ─────────────────────────
             const timeLeft = (audio.duration || 0) - audio.currentTime;
             if (timeLeft > 0 && timeLeft < 0.8) {
               const nextIdx = audioLoadedForSent.current + 1;
               if (nextIdx < job.sentences.length) {
                 preloadSentenceAudio(seg, nextIdx);
               } else {
-                // Last sentence of this segment — preload first of next segment
                 const nextSeg = seg + stepRef.current;
                 const nextJob = jobsRef.current.get(nextSeg);
                 if (nextJob?.sentences?.[0]?.sentenceStatus === 'completed') {
@@ -643,11 +653,29 @@ export default function Home() {
                 }
               }
             }
+
+          } else if (!audioActive && audio && !audio.ended && audio.src && audio.paused) {
+            // Audio is loaded but paused (video was paused) → resume
+            audio.play().catch(() => {});
+          } else if (!audioActive && audio && audio.ended) {
+            // Audio ended slightly before video exits sentence — wait silently
+          } else if (!audioActive && audioLoadedForSent.current < 0) {
+            // Nothing loaded yet → start this sentence
+            const safeStart = Math.min(
+              expectedAudioPos,
+              Math.max(0, (s.audioDuration ?? s.originalDuration ?? 0) - 0.1)
+            );
+            loadSentenceAudio(seg, sentenceIdx, s.audioUrl, Math.max(0, safeStart));
+          }
+        } else if (s.sentenceStatus !== 'completed') {
+          // Sentence not ready: mark as pending so we start it once it's done
+          if (pendingNextSentRef.current < 0) {
+            pendingNextSentRef.current = sentenceIdx;
           }
         }
 
       } else {
-        // Between sentences — pause audio and clear display
+        // ── Between sentences: pause audio and clear display ─────────────────
         if (currentSentIdxRef.current >= 0) {
           if (audio && !audio.paused) audio.pause();
           currentSentIdxRef.current  = -1;
@@ -657,12 +685,13 @@ export default function Home() {
           setCurrentSentenceIdx(-1);
           setCurrentSentence(null);
           setCurrentSpeedInfo(null);
+          applyVideoRate(1.0);
         }
       }
 
       lastVideoTimeRef.current = videoTime;
-    }, 100);
-  }, [loadSentenceAudio, preloadSentenceAudio]);
+    }, 80); // 80ms interval for better sync precision
+  }, [loadSentenceAudio, preloadSentenceAudio, applyVideoRate, currentSpeedInfo]);
 
   const stopSyncLoop = useCallback(() => {
     if (syncLoopRef.current) { clearInterval(syncLoopRef.current); syncLoopRef.current = null; }
@@ -743,6 +772,9 @@ export default function Home() {
     setCurrentSentence(null);
     setCurrentSentenceIdx(-1);
 
+    // ── Mute original video audio when TTS starts ─────────────────────────
+    if (muteOriginal) muteVideo();
+
     const getVT   = () => videoRef.current ? videoRef.current.currentTime : (ytRef.current?.getCurrentTime() ?? 0);
     const getDur  = () => videoRef.current ? (videoRef.current.duration || 0) : (ytRef.current?.getDuration() || 0);
     const pauseV  = () => { if (videoRef.current) videoRef.current.pause(); else ytRef.current?.pauseVideo(); };
@@ -773,7 +805,6 @@ export default function Home() {
           if (count <= MAX_RETRIES && Date.now() - lastRetry > 5000) startSegJob(seg, true);
         }
 
-        // Pre-fetch next segment once current completes
         if (currentJob?.status === 'completed') {
           const nextSeg = seg + step;
           if (nextSeg < dur && !kickCountRef.current.has(nextSeg)) startSegJob(nextSeg);
@@ -798,7 +829,6 @@ export default function Home() {
             setIsWaitingForProcess(false);
             playV();
           }
-          // Sync loop handles audio switching — no need to load audio here
         } else if (freshJob.status === 'failed') {
           if (waitingRef.current && (kickCountRef.current.get(seg) ?? 0) > MAX_RETRIES) {
             waitingRef.current = false;
@@ -819,7 +849,8 @@ export default function Home() {
     };
 
     runLoop();
-  }, [isValid, selectedVoice, selectedEngine, selectedLanguage, url, duration, syncJobs, startSegJob, startSyncLoop, stopSyncLoop]);
+  }, [isValid, selectedVoice, selectedEngine, selectedLanguage, url, duration, muteOriginal,
+      syncJobs, startSegJob, startSyncLoop, stopSyncLoop, muteVideo]);
 
   const stopTranslation = useCallback(() => {
     stopRequestedRef.current   = true;
@@ -834,8 +865,9 @@ export default function Home() {
     if (audioRef.current) { audioRef.current.pause(); audioRef.current.playbackRate = 1.0; audioRef.current.src = ''; }
     if (preloadRef.current) { preloadRef.current.src = ''; }
     preloadTriggeredRef.current = '';
-    // استعادة سرعة الفيديو الطبيعية عند الإيقاف
+    // Restore video speed and unmute
     applyVideoRate(1.0);
+    if (autoMutedRef.current) unmuteVideo();
     activeSegRef.current        = -1;
     playingSegRef.current       = -1;
     currentSentIdxRef.current   = -1;
@@ -846,80 +878,63 @@ export default function Home() {
     lastSeekCheckRef.current    = -1;
     setActiveSeg(-1);
     setCurrentSpeedInfo(null);
-  }, [stopSyncLoop]);
+  }, [stopSyncLoop, applyVideoRate, unmuteVideo]);
 
   useEffect(() => () => stopSyncLoop(), [stopSyncLoop]);
 
-  // ── HTML5 video event handlers ─────────────────────────────────────────────
-  // Reset seek detector when the user seeks in the HTML5 player
+  // ── HTML5 video seek handler ───────────────────────────────────────────────
   useEffect(() => {
     const vid = videoRef.current;
     if (!vid) return;
-
-    const onSeeked = () => {
-      // Let the sync loop handle the rest; just reset the seek check baseline
-      lastSeekCheckRef.current = vid.currentTime;
-    };
-
+    const onSeeked = () => { lastSeekCheckRef.current = vid.currentTime; };
     vid.addEventListener('seeked', onSeeked);
     return () => vid.removeEventListener('seeked', onSeeked);
-  }, [directVideoUrl]); // re-attach when URL changes
+  }, [directVideoUrl]);
 
-  // ── audio.ended — PRIMARY sentence advancement driver ─────────────────────
-  // When a sentence's audio finishes, immediately load the next one.
-  // If video has jumped 2+ sentences ahead, snap to video position instead.
+  // ── audio.ended: backup handler (sync loop handles the primary case) ───────
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
 
     const onEnded = () => {
-      const seg     = playingSegRef.current;
-      const curIdx  = audioLoadedForSent.current;
+      // With video-led sync, the sync loop will start the next sentence when
+      // the video enters its window. We just clear the loaded state so the
+      // loop doesn't think this sentence is still active.
+      const seg    = playingSegRef.current;
+      const curIdx = audioLoadedForSent.current;
       if (seg < 0 || curIdx < 0) return;
 
       const job = jobsRef.current.get(seg);
       if (!job?.sentences) return;
 
-      // Determine next sentence index
-      // If video is significantly ahead, snap to it; otherwise advance by 1
+      // Advance to next sentence in advance (for audio.ended happening
+      // just before video exits the sentence — unlikely but safe fallback)
       const videoIdx = videoSentIdxRef.current;
-      const nextIdx  = videoIdx > curIdx + 1 ? videoIdx : curIdx + 1;
+      const nextIdx  = videoIdx > curIdx ? videoIdx : curIdx + 1;
 
       if (nextIdx < job.sentences.length) {
         const next = job.sentences[nextIdx];
         if (next?.audioUrl && next.sentenceStatus === 'completed') {
-          loadSentenceAudio(seg, nextIdx, next.audioUrl, 0);
-          // Eagerly preload the sentence after next (N+2)
-          preloadSentenceAudio(seg, nextIdx + 1);
+          // Pre-load it; sync loop will decide exact start position
+          preloadSentenceAudio(seg, nextIdx);
         } else {
           pendingNextSentRef.current = nextIdx;
-          if (next?.arabicText && next.arabicText !== currentSentTextRef.current) {
-            currentSentTextRef.current = next.arabicText;
-            setCurrentSentence(next.arabicText);
-          }
         }
-        return;
-      }
-
-      // Last sentence of segment — try first sentence of next segment
-      const step    = stepRef.current;
-      const nextSeg = seg + step;
-      const nextJob = jobsRef.current.get(nextSeg);
-      if (nextJob?.sentences?.length) {
-        const first = nextJob.sentences[0];
-        if (first?.audioUrl && first.sentenceStatus === 'completed') {
-          loadSentenceAudio(nextSeg, 0, first.audioUrl, 0);
-          preloadSentenceAudio(nextSeg, 1); // preload 2nd sentence of next segment
-        } else {
-          pendingNextSentRef.current = 0;
+      } else {
+        // Last sentence of segment — preload first of next
+        const nextSeg = seg + stepRef.current;
+        const nextJob = jobsRef.current.get(nextSeg);
+        if (nextJob?.sentences?.[0]?.sentenceStatus === 'completed') {
+          preloadSentenceAudio(nextSeg, 0);
         }
       }
     };
 
     audio.addEventListener('ended', onEnded);
     return () => audio.removeEventListener('ended', onEnded);
-  }, [loadSentenceAudio, preloadSentenceAudio]);
+  }, [preloadSentenceAudio]);
 
+  // ── Cookies handlers ──────────────────────────────────────────────────────
   const handleSaveCookies = async () => {
     if (!cookieText.trim()) return;
     setCookiesSaving(true);
@@ -939,13 +954,61 @@ export default function Home() {
     toast({ title: 'تم حذف الكوكيز' });
   };
 
-  // ── Segment sentence summary (for status display) ──────────────────────────
+  // ── Segment sentence summary ───────────────────────────────────────────────
   const getSentenceSummary = (job: SegJob) => {
     if (!job.sentences) return null;
     const total     = job.sentences.length;
     const completed = job.sentences.filter(s => s.sentenceStatus === 'completed').length;
     return { total, completed };
   };
+
+  // ── AI Chat ───────────────────────────────────────────────────────────────
+  // مساعد ذكاء اصطناعي مدمج — يعمل بـ Pollinations AI (مجاني، بدون مفتاح)
+  const sendAiMessage = useCallback(async () => {
+    if (!aiInput.trim() || aiLoading) return;
+    const userMsg = aiInput.trim();
+    setAiInput('');
+    setAiMessages(prev => [...prev, { role: 'user', text: userMsg }]);
+    setAiLoading(true);
+
+    // Build context from current translation state
+    const ctxParts: string[] = [];
+    if (videoTitle)      ctxParts.push(`عنوان الفيديو: "${videoTitle}"`);
+    if (currentSentence) ctxParts.push(`الجملة المترجمة الحالية: "${currentSentence}"`);
+
+    const systemPart =
+      `أنت مساعد ذكاء اصطناعي متخصص في تطبيق مترجم الفيديو العربي. ` +
+      `تساعد المستخدم على فهم الترجمة، شرح المعاني، والإجابة عن أسئلته باللغة العربية. ` +
+      (ctxParts.length ? `[السياق: ${ctxParts.join(' | ')}] ` : '');
+
+    const fullPrompt = `${systemPart}\n\nسؤال المستخدم: ${userMsg}`;
+
+    try {
+      const resp = await fetch(
+        `https://text.pollinations.ai/${encodeURIComponent(fullPrompt)}`,
+        { signal: AbortSignal.timeout(30_000) }
+      );
+      const text = resp.ok ? (await resp.text()).trim() : '';
+      setAiMessages(prev => [...prev, {
+        role: 'assistant',
+        text: text || 'لم أتمكن من الحصول على رد. حاول مرة أخرى.',
+      }]);
+    } catch {
+      setAiMessages(prev => [...prev, {
+        role: 'assistant',
+        text: 'انتهت مهلة الاتصال. تأكد من اتصال الإنترنت وحاول مجدداً.',
+      }]);
+    } finally {
+      setAiLoading(false);
+    }
+  }, [aiInput, aiLoading, videoTitle, currentSentence]);
+
+  // Auto-scroll AI chat to bottom
+  useEffect(() => {
+    if (showAiPanel && aiChatBottomRef.current) {
+      aiChatBottomRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [aiMessages, showAiPanel]);
 
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
@@ -1121,6 +1184,31 @@ export default function Home() {
             </Select>
           </div>
 
+          {/* Mute toggle */}
+          <div className="flex items-center justify-between bg-slate-800/40 rounded-lg px-3 py-2 border border-slate-700/30">
+            <div className="flex items-center gap-2">
+              {muteOriginal
+                ? <VolumeX className="w-4 h-4 text-amber-400 shrink-0" />
+                : <Volume2  className="w-4 h-4 text-emerald-400 shrink-0" />}
+              <div>
+                <p className="text-xs font-medium text-slate-300">
+                  {muteOriginal ? 'الصوت الأصلي: مكتوم' : 'الصوت الأصلي: مُفعَّل'}
+                </p>
+                <p className="text-[10px] text-slate-500">
+                  {muteOriginal ? 'يُسمع صوت TTS فقط' : 'يُسمع الصوت الأصلي مع TTS'}
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => setMuteOriginal(v => !v)}
+              className={`relative w-10 h-5 rounded-full transition-colors ${muteOriginal ? 'bg-amber-500/40' : 'bg-emerald-500/40'}`}
+            >
+              <span className={`absolute top-0.5 w-4 h-4 rounded-full transition-transform shadow ${
+                muteOriginal ? 'right-0.5 bg-amber-400' : 'left-0.5 bg-emerald-400'
+              }`} />
+            </button>
+          </div>
+
         </Card>
 
         {/* Video Player (YouTube or HTML5) */}
@@ -1129,7 +1217,6 @@ export default function Home() {
             <div className="relative w-full" style={{ paddingBottom: '56.25%' }}>
               <div className="absolute inset-0">
                 {videoId ? (
-                  /* ── YouTube player ── */
                   <YouTube
                     videoId={videoId}
                     onReady={handleYtReady}
@@ -1142,7 +1229,6 @@ export default function Home() {
                     className="w-full h-full"
                   />
                 ) : directVideoUrl ? (
-                  /* ── HTML5 direct video player ── */
                   <video
                     ref={videoRef}
                     src={directVideoUrl}
@@ -1156,7 +1242,6 @@ export default function Home() {
                 ) : null}
               </div>
 
-              {/* Fullscreen button */}
               {directVideoUrl && (
                 <button
                   onClick={() => videoRef.current?.requestFullscreen?.()}
@@ -1202,7 +1287,7 @@ export default function Home() {
         <audio ref={audioRef} className="hidden" />
         <audio ref={preloadRef} className="hidden" preload="auto" />
 
-        {/* Current Sentence Display — instant transitions, no animation flash */}
+        {/* Current Sentence Display */}
         {isRunning && (
           <Card className="bg-slate-900/60 border-slate-700/60 p-4">
             <div className="flex items-start gap-3">
@@ -1224,7 +1309,7 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Speed comparison bar */}
+            {/* Speed info */}
             {currentSpeedInfo && (
               <div className="mt-3 pt-3 border-t border-slate-700/40">
                 <div className="flex items-center gap-2 text-[11px] text-slate-400 mb-1.5">
@@ -1248,7 +1333,6 @@ export default function Home() {
                     <span className="text-slate-300 font-mono">{currentSpeedInfo.tts.toFixed(2)}ث</span>
                   </div>
                 </div>
-                {/* Visual speed bar */}
                 <div className="mt-1.5 h-1.5 bg-slate-800 rounded-full overflow-hidden">
                   <div
                     className={`h-full rounded-full transition-all ${
@@ -1331,7 +1415,7 @@ export default function Home() {
           />
         )}
 
-        {/* Segments status — shows per-sentence progress */}
+        {/* Segments status */}
         {hasStarted && jobs.size > 0 && (
           <div className="space-y-2">
             <p className="text-xs text-slate-500 font-medium flex items-center gap-1.5">
@@ -1340,7 +1424,7 @@ export default function Home() {
             </p>
             <div className="space-y-2">
               {[...jobs.entries()].sort((a, b) => a[0] - b[0]).map(([seg, job]) => {
-                const summary = getSentenceSummary(job);
+                const summary  = getSentenceSummary(job);
                 const isActive = activeSeg === seg;
                 return (
                   <div
@@ -1355,7 +1439,6 @@ export default function Home() {
                         : 'bg-slate-800/50 border-slate-700/50'
                     }`}
                   >
-                    {/* Segment header */}
                     <div className="flex items-center justify-between mb-1.5">
                       <div className="flex items-center gap-1.5">
                         {job.status === 'completed'
@@ -1374,7 +1457,6 @@ export default function Home() {
                       )}
                     </div>
 
-                    {/* Per-sentence status dots */}
                     {job.sentences && job.sentences.length > 0 && (
                       <div className="flex flex-wrap gap-1">
                         {job.sentences.map((s, i) => (
@@ -1399,7 +1481,6 @@ export default function Home() {
                       </div>
                     )}
 
-                    {/* Progress text while processing */}
                     {job.status === 'processing' && isActive && job.progress && (
                       <p className="text-[10px] text-slate-500 mt-1.5">{job.progress}</p>
                     )}
@@ -1467,6 +1548,135 @@ export default function Home() {
               )}
             </div>
           )}
+        </div>
+
+        {/* ─── AI ASSISTANT PANEL ──────────────────────────────────────────────── */}
+        <div className="border border-violet-800/40 rounded-xl overflow-hidden bg-slate-900/40">
+          <button
+            onClick={() => setShowAiPanel(v => !v)}
+            className="w-full flex items-center justify-between px-4 py-3 text-sm hover:bg-slate-800/30 transition-colors"
+          >
+            <div className="flex items-center gap-2">
+              <div className="w-6 h-6 rounded-full bg-violet-500/20 border border-violet-500/40 flex items-center justify-center">
+                <Bot className="w-3.5 h-3.5 text-violet-400" />
+              </div>
+              <span className="text-violet-300 font-medium">مساعد الذكاء الاصطناعي</span>
+              <span className="text-[10px] bg-violet-500/20 text-violet-400 px-1.5 py-0.5 rounded-full">
+                مجاني • مدمج
+              </span>
+            </div>
+            {showAiPanel ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
+          </button>
+
+          <AnimatePresence>
+            {showAiPanel && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                className="border-t border-violet-800/30"
+              >
+                {/* Chat messages */}
+                <div className="max-h-72 overflow-y-auto px-4 py-3 space-y-3">
+                  {aiMessages.length === 0 ? (
+                    <div className="text-center py-6">
+                      <Bot className="w-8 h-8 text-violet-400/40 mx-auto mb-2" />
+                      <p className="text-xs text-slate-500">اسألني عن الترجمة، معاني الكلمات، أو أي شيء آخر!</p>
+                      <div className="flex flex-wrap gap-1.5 justify-center mt-3">
+                        {['ما معنى هذه الجملة؟', 'اشرح الترجمة', 'ما موضوع الفيديو؟'].map(q => (
+                          <button
+                            key={q}
+                            onClick={() => { setAiInput(q); }}
+                            className="text-[11px] bg-violet-500/10 border border-violet-500/20 text-violet-300 px-2 py-1 rounded-full hover:bg-violet-500/20 transition-colors"
+                          >
+                            {q}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      {aiMessages.map((msg, i) => (
+                        <div key={i} className={`flex gap-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                          {msg.role === 'assistant' && (
+                            <div className="w-6 h-6 rounded-full bg-violet-500/20 border border-violet-500/30 flex items-center justify-center shrink-0 mt-0.5">
+                              <Bot className="w-3 h-3 text-violet-400" />
+                            </div>
+                          )}
+                          <div className={`max-w-[80%] rounded-2xl px-3 py-2 text-sm leading-relaxed ${
+                            msg.role === 'user'
+                              ? 'bg-violet-600/30 border border-violet-500/20 text-violet-100 rounded-tr-sm'
+                              : 'bg-slate-800/80 border border-slate-700/50 text-slate-200 rounded-tl-sm'
+                          }`}>
+                            {msg.text}
+                          </div>
+                          {msg.role === 'user' && (
+                            <div className="w-6 h-6 rounded-full bg-slate-700 flex items-center justify-center shrink-0 mt-0.5">
+                              <User className="w-3 h-3 text-slate-300" />
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                      {aiLoading && (
+                        <div className="flex gap-2 justify-start">
+                          <div className="w-6 h-6 rounded-full bg-violet-500/20 border border-violet-500/30 flex items-center justify-center shrink-0">
+                            <Bot className="w-3 h-3 text-violet-400" />
+                          </div>
+                          <div className="bg-slate-800/80 border border-slate-700/50 rounded-2xl rounded-tl-sm px-3 py-2">
+                            <div className="flex gap-1">
+                              {[0, 1, 2].map(i => (
+                                <motion.div key={i} className="w-1.5 h-1.5 rounded-full bg-violet-400"
+                                  animate={{ scale: [1, 1.4, 1], opacity: [0.4, 1, 0.4] }}
+                                  transition={{ duration: 0.8, repeat: Infinity, delay: i * 0.18 }} />
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      <div ref={aiChatBottomRef} />
+                    </>
+                  )}
+                </div>
+
+                {/* Input area */}
+                <div className="px-4 pb-4 pt-2 border-t border-slate-800/60">
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={aiInput}
+                      onChange={e => setAiInput(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendAiMessage(); } }}
+                      placeholder="اكتب سؤالك هنا..."
+                      disabled={aiLoading}
+                      className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-violet-500/50 transition-colors disabled:opacity-50"
+                    />
+                    <button
+                      onClick={sendAiMessage}
+                      disabled={aiLoading || !aiInput.trim()}
+                      className="w-9 h-9 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition-colors shrink-0"
+                    >
+                      {aiLoading
+                        ? <Loader2 className="w-4 h-4 text-white animate-spin" />
+                        : <Send className="w-4 h-4 text-white" />}
+                    </button>
+                    {aiMessages.length > 0 && !aiLoading && (
+                      <button
+                        onClick={() => setAiMessages([])}
+                        className="w-9 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 flex items-center justify-center transition-colors shrink-0 border border-slate-700"
+                        title="مسح المحادثة"
+                      >
+                        <X className="w-4 h-4 text-slate-400" />
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-[10px] text-slate-600 mt-1.5 text-center">
+                    مشغَّل بـ Pollinations AI • مجاني تماماً • يعمل بدون مفتاح
+                  </p>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
 
       </div>
